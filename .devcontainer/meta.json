@@ -1,0 +1,13 @@
+{
+  "features": ["age","kmax0","pachy0","bcva0","cyl0","group"],
+  "groups": ["FRAK","FRAKcross"],
+  "endpoint_A_threshold_dkmax": 1.5,
+  "endpoint_C_threshold_dkmax": 1.5,
+  "endpoint_C_bcva_drop": 0.2,
+  "endpoint_C_cyl_increase": 1.0,
+  "risk_tiers": [
+    {"name": "Low", "max": 0.15, "hint": "Annual follow-up"},
+    {"name": "Intermediate", "max": 0.35, "hint": "Consider 6-month follow-up"},
+    {"name": "High", "max": 1.0, "hint": "Closer monitoring / consider early CXL"}
+  ]
+}
