@@ -3,6 +3,7 @@ import json
 import re
 import ast
 from pathlib import Path
+from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
@@ -37,7 +38,7 @@ def resolve_paths(base: Path, filename: str) -> Path:
     p2 = base / "assets" / filename
     if p2.exists():
         return p2
-    return p1  # expected path for clean error messages
+    return p1
 
 
 def _extract_untrusted_types_from_message(msg: str) -> list[str]:
@@ -50,7 +51,6 @@ def _extract_untrusted_types_from_message(msg: str) -> list[str]:
         - c.d.Other
     This helper supports both.
     """
-    # Format A: Python-like list on the same line
     m = re.search(r"Untrusted types found in the file:\s*(\[[\s\S]*\])", msg)
     if m:
         try:
@@ -60,7 +60,6 @@ def _extract_untrusted_types_from_message(msg: str) -> list[str]:
         except Exception:
             pass
 
-    # Format B: bullet list with "- "
     extra = re.findall(r"^\s*-\s*(.+?)\s*$", msg, flags=re.MULTILINE)
     return [x.strip() for x in extra if x.strip()]
 
@@ -79,7 +78,6 @@ def safe_skops_load(path: Path, debug=False):
     trusted_base = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
-        # Common sklearn internal type causing issues across versions
         "sklearn.compose._column_transformer._RemainderColsList",
         "sklearn.impute._base.SimpleImputer",
         "sklearn.preprocessing._encoders.OneHotEncoder",
@@ -98,7 +96,6 @@ def safe_skops_load(path: Path, debug=False):
             raise RuntimeError(f"Failed to load {path.name}:\n{msg}")
 
         extra_types = _extract_untrusted_types_from_message(msg)
-
         if not extra_types:
             raise RuntimeError(
                 f"skops blocked {path.name} but could not extract untrusted types.\n\nFull error:\n{msg}"
@@ -111,6 +108,14 @@ def safe_skops_load(path: Path, debug=False):
             st.sidebar.code("\n".join(extra_types))
 
         return sio.load(path, trusted=trusted_final), trusted_final, extra_types
+
+
+def tier(p: float) -> str:
+    if p < 0.15:
+        return "Low"
+    if p < 0.35:
+        return "Intermediate"
+    return "High"
 
 
 # -----------------------------
@@ -216,6 +221,34 @@ X = pd.DataFrame([{
 
 
 # -----------------------------
+# INPUT ECHO + PLAUSIBILITY FLAGS
+# -----------------------------
+st.subheader("🧾 Inputs (echo)")
+c_in1, c_in2, c_in3 = st.columns(3)
+c_in1.metric("Age (y)", f"{float(age):.0f}")
+c_in2.metric("Kmax (D)", f"{float(kmax0):.1f}")
+c_in3.metric("Min pachy (µm)", f"{float(pachy0):.0f}")
+
+c_in4, c_in5, c_in6 = st.columns(3)
+c_in4.metric("BCVA (decimal)", f"{float(bcva0):.2f}")
+c_in5.metric("Cylinder (D)", f"{float(cyl0):.2f}")
+c_in6.metric("Group", f"{group}")
+
+flags = []
+if float(pachy0) < 400:
+    flags.append("Very thin cornea (pachymetry < 400 µm).")
+if float(kmax0) > 60:
+    flags.append("Very steep cornea (Kmax > 60 D).")
+if float(age) < 12:
+    flags.append("Very young age (age < 12).")
+if float(age) > 45:
+    flags.append("Older age (age > 45).")
+
+if flags:
+    st.warning("⚠️ Plausibility flags (may be outside training distribution):\n- " + "\n- ".join(flags))
+
+
+# -----------------------------
 # PREDICTIONS
 # -----------------------------
 risk_A = float(modelA.predict_proba(X)[0, 1])
@@ -233,13 +266,7 @@ c2.metric("Endpoint C (Composite risk)", f"{risk_C*100:.1f}%")
 c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
 
 st.subheader("🧠 Clinical interpretation (Endpoint C)")
-
-def tier(p: float) -> str:
-    if p < 0.15:
-        return "Low"
-    if p < 0.35:
-        return "Intermediate"
-    return "High"
+st.caption("Risk tiers: Low < 15% • Intermediate 15–35% • High ≥ 35%")
 
 t = tier(risk_C)
 st.markdown(f"### **{t} risk**")
@@ -251,5 +278,61 @@ elif t == "Intermediate":
 else:
     st.success("✅ Low risk. Standard follow-up may be sufficient.")
 
+
+# -----------------------------
+# SLOPE PROJECTIONS (simple linear projection)
+# -----------------------------
+st.subheader("📈 Endpoint B: simple projections (linear)")
+proj = pd.DataFrame(
+    {
+        "Horizon": ["1 year", "2 years", "3 years"],
+        "Projected ΔKmax (D)": [1 * slope_B, 2 * slope_B, 3 * slope_B],
+    }
+)
+st.dataframe(
+    proj.style.format({"Projected ΔKmax (D)": "{:+.2f}"}),
+    use_container_width=True,
+    hide_index=True,
+)
+st.caption("Note: Linear projection shown for interpretability only; not a mechanistic forecast.")
+
+
+# -----------------------------
+# EXPORT (JSON audit bundle)
+# -----------------------------
+st.subheader("⬇️ Export (audit bundle)")
+bundle = {
+    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    "app": {"name": "KeraRisk-CXL", "purpose": "Research use only"},
+    "inputs": {
+        "age": float(age),
+        "kmax0": float(kmax0),
+        "pachy0": float(pachy0),
+        "bcva0": float(bcva0),
+        "cyl0": float(cyl0),
+        "group": str(group),
+    },
+    "outputs": {
+        "risk_A": risk_A,
+        "risk_C": risk_C,
+        "slope_B": slope_B,
+        "tier_C": t,
+        "tier_thresholds": {"low_lt": 0.15, "intermediate_lt": 0.35, "high_ge": 0.35},
+        "slope_projection": {
+            "1y": 1 * slope_B,
+            "2y": 2 * slope_B,
+            "3y": 3 * slope_B,
+        },
+    },
+    "plausibility_flags": flags,
+}
+st.download_button(
+    label="Download JSON report",
+    data=json.dumps(bundle, indent=2).encode("utf-8"),
+    file_name="kerarisk_report.json",
+    mime="application/json",
+)
+
 st.markdown("---")
 st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical use.")
+
