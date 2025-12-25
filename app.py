@@ -35,7 +35,7 @@ def load_assets():
     # 1) Prefer ROOT (repo root where app.py lives)
     root_dir = base
 
-    # 2) Fallback to assets/ if user later creates it
+    # 2) Fallback to assets/
     assets_dir = base / "assets"
 
     def resolve_file(filename: str) -> Path:
@@ -45,8 +45,7 @@ def load_assets():
         p2 = assets_dir / filename
         if p2.exists():
             return p2
-        # If none exists, return expected root path for a clean error message
-        return p1
+        return p1  # expected (for clean error msg)
 
     modelA_path = resolve_file(MODEL_A_NAME)
     modelB_path = resolve_file(MODEL_B_NAME)
@@ -63,16 +62,25 @@ def load_assets():
             + f"\nAlso checked: {assets_dir}"
         )
 
-    # Trusted types for skops safe loading
+    # ✅ Trusted types for skops safe loading (FIXES Untrusted types)
     trusted = [
+        # sklearn core
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
+        "sklearn.compose._column_transformer._RemainderColsList",
+
+        # preprocessing
         "sklearn.impute._base.SimpleImputer",
         "sklearn.preprocessing._encoders.OneHotEncoder",
         "sklearn.preprocessing._data.StandardScaler",
+
+        # models
         "sklearn.linear_model._logistic.LogisticRegression",
         "sklearn.linear_model._coordinate_descent.ElasticNet",
+
+        # numpy internals (safe)
         "numpy.ndarray",
+        "numpy.dtype",
     ]
 
     modelA = sio.load(modelA_path, trusted=trusted)
@@ -84,7 +92,7 @@ def load_assets():
     # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
-            # If pipeline has pre -> cat -> oh, infer categories
+            # Infer categories from OneHotEncoder if present
             ohe = (
                 modelC.named_steps["pre"]
                       .named_transformers_["cat"]
@@ -94,7 +102,6 @@ def load_assets():
         except Exception:
             meta["groups"] = ["FRAK", "FRAKcross"]
 
-    # Return also paths used (for debug display)
     used_paths = {
         "modelA": str(modelA_path),
         "modelB": str(modelB_path),
@@ -122,9 +129,11 @@ except Exception as e:
 if debug:
     st.sidebar.write("Resolved paths:")
     st.sidebar.json(used_paths)
+
     base = Path(used_paths["base"])
     st.sidebar.write("Files in base:")
     st.sidebar.write(sorted([p.name for p in base.iterdir() if p.is_file()]))
+
     assets_dir = Path(used_paths["assets_dir"])
     if assets_dir.exists():
         st.sidebar.write("Files in assets/:")
@@ -194,6 +203,7 @@ else:
 
 st.markdown("---")
 st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical deployment.")
+
 
 
 
