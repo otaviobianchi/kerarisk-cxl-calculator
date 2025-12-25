@@ -1,80 +1,58 @@
+# app.py
 import json
-import re
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import skops.io as sio
 
+
+# -----------------------------
+# PAGE
+# -----------------------------
 st.set_page_config(page_title="KeraRisk-CXL Calculator", layout="centered")
 st.title("🩺 KeraRisk-CXL Calculator")
 st.caption("Research use only — not a diagnostic device.")
 
+
+# -----------------------------
+# CONFIG: FILENAMES (repo ROOT)
+# -----------------------------
 MODEL_A_NAME = "KeraRisk_modelA.skops"
 MODEL_B_NAME = "KeraRisk_modelB.skops"
 MODEL_C_NAME = "KeraRisk_modelC.skops"
 META_NAME    = "kerarisk_meta.json"
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def resolve_paths(base: Path, filename: str) -> Path:
-    # ROOT first (same folder as app.py)
-    p = base / filename
-    if p.exists():
-        return p
-    # optional fallback
+    """Look in repo root first; if not found, try assets/ as fallback."""
+    p1 = base / filename
+    if p1.exists():
+        return p1
     p2 = base / "assets" / filename
     if p2.exists():
         return p2
-    return p
+    return p1  # for clean error message
 
 
-def safe_skops_load(path: Path, debug=False):
-    trusted = [
-        "sklearn.pipeline.Pipeline",
-        "sklearn.compose._column_transformer.ColumnTransformer",
-        "sklearn.impute._base.SimpleImputer",
-        "sklearn.preprocessing._encoders.OneHotEncoder",
-        "sklearn.preprocessing._data.StandardScaler",
-        "sklearn.linear_model._logistic.LogisticRegression",
-        "sklearn.linear_model._coordinate_descent.ElasticNet",
-        "numpy.ndarray",
-        "numpy.dtype",
-    ]
-
-    try:
-        return sio.load(path, trusted=trusted), trusted, []
-    except Exception as e:
-        msg = str(e)
-        if "Untrusted types found in the file" not in msg:
-            raise
-
-        # old skops: get_untrusted_types(path)
-        # new skops: get_untrusted_types() (no args) -> so parse from msg
-        untrusted_str = []
-        try:
-            untrusted = sio.get_untrusted_types(path)
-            untrusted_str = [str(t) for t in untrusted]
-        except TypeError:
-            untrusted_str = re.findall(r"^\s*-\s*(.+?)\s*$", msg, flags=re.MULTILINE)
-
-        if not untrusted_str:
-            if debug:
-                st.sidebar.warning(f"Couldn't extract untrusted types for {path.name}. Using trusted=True.")
-            obj = sio.load(path, trusted=True)
-            return obj, ["trusted=True"], ["(fallback: trusted=True)"]
-
-        trusted2 = sorted(set(trusted + untrusted_str))
-
-        if debug:
-            st.sidebar.write(f"🔐 Auto-trusting {len(untrusted_str)} extra type(s) for {path.name}:")
-            st.sidebar.code("\n".join(untrusted_str))
-
-        obj = sio.load(path, trusted=trusted2)
-        return obj, trusted2, untrusted_str
+def safe_skops_load_trusted(path: Path):
+    """
+    Load .skops assuming the file is controlled by you (same repo).
+    This avoids any call to get_untrusted_types(), so it will not break
+    across skops versions with changing signatures.
+    """
+    # trusted=True is appropriate ONLY when the model file is from a trusted source (your repo)
+    return sio.load(path, trusted=True)
 
 
+# -----------------------------
+# LOAD ASSETS
+# -----------------------------
 @st.cache_resource
-def load_assets(debug_flag=False):
+def load_assets():
     base = Path(__file__).resolve().parent
 
     modelA_path = resolve_paths(base, MODEL_A_NAME)
@@ -85,19 +63,22 @@ def load_assets(debug_flag=False):
     missing = [p for p in [modelA_path, modelB_path, modelC_path, meta_path] if not p.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing required file(s) in repo root:\n"
+            "Missing required file(s):\n"
             + "\n".join([f"- {p.name} (expected at: {p})" for p in missing])
             + f"\n\nBase directory: {base}"
+            + f"\nAlso checked: {base/'assets'}"
         )
 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
-    modelA, trustedA, extraA = safe_skops_load(modelA_path, debug=debug_flag)
-    modelB, trustedB, extraB = safe_skops_load(modelB_path, debug=debug_flag)
-    modelC, trustedC, extraC = safe_skops_load(modelC_path, debug=debug_flag)
+    modelA = safe_skops_load_trusted(modelA_path)
+    modelB = safe_skops_load_trusted(modelB_path)
+    modelC = safe_skops_load_trusted(modelC_path)
 
+    # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
+            # attempt to infer groups from modelC OneHotEncoder categories
             ohe = (
                 modelC.named_steps["pre"]
                       .named_transformers_["cat"]
@@ -107,34 +88,40 @@ def load_assets(debug_flag=False):
         except Exception:
             meta["groups"] = ["FRAK", "FRAKcross"]
 
-    return modelA, modelB, modelC, meta, {
+    used_paths = {
         "modelA": str(modelA_path),
         "modelB": str(modelB_path),
         "modelC": str(modelC_path),
         "meta": str(meta_path),
         "base": str(base),
-    }, {
-        "modelA_extra_trusted": extraA,
-        "modelB_extra_trusted": extraB,
-        "modelC_extra_trusted": extraC,
+        "assets_dir": str(base / "assets"),
     }
 
+    return modelA, modelB, modelC, meta, used_paths
 
-debug = st.sidebar.checkbox("Debug (paths & trusted types)", value=False)
+
+# -----------------------------
+# DEBUG UI
+# -----------------------------
+debug = st.sidebar.checkbox("Debug (show resolved paths)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(debug_flag=debug)
+    modelA, modelB, modelC, meta, used_paths = load_assets()
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
     st.stop()
 
 if debug:
+    st.sidebar.write("Resolved paths:")
     st.sidebar.json(used_paths)
-    st.sidebar.json(trusted_report)
 
 
+# -----------------------------
+# INPUTS
+# -----------------------------
 st.sidebar.header("📥 Patient baseline data")
+
 age = st.sidebar.number_input("Age (years)", min_value=8, max_value=80, value=18)
 kmax0 = st.sidebar.number_input("Kmax (D)", min_value=40.0, max_value=90.0, value=55.0, step=0.1)
 pachy0 = st.sidebar.number_input("Minimum pachymetry (µm)", min_value=300, max_value=650, value=450)
@@ -152,10 +139,18 @@ X = pd.DataFrame([{
     "group": str(group),
 }])
 
+
+# -----------------------------
+# PREDICTIONS
+# -----------------------------
 risk_A = float(modelA.predict_proba(X)[0, 1])
 risk_C = float(modelC.predict_proba(X)[0, 1])
 slope_B = float(modelB.predict(X)[0])
 
+
+# -----------------------------
+# OUTPUTS
+# -----------------------------
 st.subheader("📊 Model outputs")
 c1, c2, c3 = st.columns(3)
 c1.metric("Endpoint A (ΔKmax progression)", f"{risk_A*100:.1f}%")
