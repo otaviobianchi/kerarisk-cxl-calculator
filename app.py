@@ -1,6 +1,7 @@
 # app.py
 import json
 import re
+import ast
 from pathlib import Path
 
 import pandas as pd
@@ -36,7 +37,32 @@ def resolve_paths(base: Path, filename: str) -> Path:
     p2 = base / "assets" / filename
     if p2.exists():
         return p2
-    return p1  # return expected path for a clean error message
+    return p1  # expected path for clean error messages
+
+
+def _extract_untrusted_types_from_message(msg: str) -> list[str]:
+    """
+    skops may report untrusted types in different formats:
+    - "Untrusted types found in the file: ['a.b.Type', 'c.d.Other']"
+    - multiline list with hyphens:
+        Untrusted types found in the file:
+        - a.b.Type
+        - c.d.Other
+    This helper supports both.
+    """
+    # Format A: Python-like list on the same line
+    m = re.search(r"Untrusted types found in the file:\s*(\[[\s\S]*\])", msg)
+    if m:
+        try:
+            parsed = ast.literal_eval(m.group(1))
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except Exception:
+            pass
+
+    # Format B: bullet list with "- "
+    extra = re.findall(r"^\s*-\s*(.+?)\s*$", msg, flags=re.MULTILINE)
+    return [x.strip() for x in extra if x.strip()]
 
 
 def safe_skops_load(path: Path, debug=False):
@@ -45,10 +71,16 @@ def safe_skops_load(path: Path, debug=False):
     - trusted MUST be list[str]
     - NEVER uses trusted=True
     - NEVER calls get_untrusted_types(path)
+
+    Strategy:
+    1) try baseline trusted list
+    2) if blocked, parse required untrusted types from error message and retry
     """
     trusted_base = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
+        # Common sklearn internal type causing issues across versions
+        "sklearn.compose._column_transformer._RemainderColsList",
         "sklearn.impute._base.SimpleImputer",
         "sklearn.preprocessing._encoders.OneHotEncoder",
         "sklearn.preprocessing._data.StandardScaler",
@@ -65,8 +97,7 @@ def safe_skops_load(path: Path, debug=False):
         if "Untrusted types found in the file" not in msg:
             raise RuntimeError(f"Failed to load {path.name}:\n{msg}")
 
-        # Extract untrusted types from skops error message (printed as "- module.Class")
-        extra_types = re.findall(r"^\s*-\s*(.+?)\s*$", msg, flags=re.MULTILINE)
+        extra_types = _extract_untrusted_types_from_message(msg)
 
         if not extra_types:
             raise RuntimeError(
@@ -222,5 +253,3 @@ else:
 
 st.markdown("---")
 st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical use.")
-
-
