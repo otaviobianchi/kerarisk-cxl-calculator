@@ -1,4 +1,5 @@
-# app.py
+# app.py  (UPDATED: handle NotFitted modelB without crashing + optional cache fingerprint)
+
 import json
 import re
 import ast
@@ -50,15 +51,6 @@ def resolve_paths(base: Path, filename: str) -> Path:
 # Helpers: skops safe load (CVE-2024-37065 compatible)
 # -----------------------------
 def _extract_untrusted_types_from_message(msg: str) -> list[str]:
-    """
-    skops may report untrusted types in different formats:
-    - "Untrusted types found in the file: ['a.b.Type', 'c.d.Other']"
-    - multiline list with hyphens:
-        Untrusted types found in the file:
-        - a.b.Type
-        - c.d.Other
-    This helper supports both.
-    """
     m = re.search(r"Untrusted types found in the file:\s*(\[[\s\S]*\])", msg)
     if m:
         try:
@@ -67,18 +59,11 @@ def _extract_untrusted_types_from_message(msg: str) -> list[str]:
                 return [str(x) for x in parsed]
         except Exception:
             pass
-
     extra = re.findall(r"^\s*-\s*(.+?)\s*$", msg, flags=re.MULTILINE)
     return [x.strip() for x in extra if x.strip()]
 
 
 def safe_skops_load(path: Path, debug=False):
-    """
-    CVE-2024-37065 safe loader for skops >= 0.10:
-    - trusted MUST be list[str]
-    - NEVER uses trusted=True
-    - NEVER calls get_untrusted_types(path)
-    """
     trusted_base = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
@@ -129,9 +114,6 @@ def tier(p: float) -> str:
 # Helpers: PDF generator
 # -----------------------------
 def build_pdf_report(bundle: dict) -> bytes:
-    """
-    Simple PDF report (A4). Returns raw bytes for download.
-    """
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     w, h = A4
@@ -142,9 +124,8 @@ def build_pdf_report(bundle: dict) -> bytes:
     def line(text, dy=0.55 * cm, font="Helvetica", size=11):
         nonlocal y
         c.setFont(font, size)
-        # basic wrap: split long strings
         max_chars = 110
-        chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)] or [""]
+        chunks = [text[i:i + max_chars] for i in range(0, len(text), max_chars)] or [""]
         for ch in chunks:
             c.drawString(left, y, ch)
             y -= dy
@@ -152,19 +133,16 @@ def build_pdf_report(bundle: dict) -> bytes:
                 c.showPage()
                 y = h - 2.2 * cm
 
-    # Header
     line("KeraRisk-CXL Calculator — Report", dy=0.75 * cm, font="Helvetica-Bold", size=14)
     line("Research use only — not a diagnostic device.", dy=0.75 * cm, font="Helvetica-Oblique", size=10)
     line(f"Generated (UTC): {bundle.get('timestamp_utc','')}", dy=0.8 * cm, size=10)
 
-    # Inputs
     line("Inputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     inp = bundle.get("inputs", {})
     for k in ["age", "kmax0", "pachy0", "bcva0", "cyl0", "group"]:
         if k in inp:
             line(f"- {k}: {inp[k]}")
 
-    # Outputs
     line("", dy=0.35 * cm)
     line("Model outputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     out = bundle.get("outputs", {})
@@ -173,12 +151,16 @@ def build_pdf_report(bundle: dict) -> bytes:
         line(f"- Endpoint A (ΔKmax progression): {out['risk_A']*100:.1f}%")
     if "risk_C" in out:
         line(f"- Endpoint C (Composite risk): {out['risk_C']*100:.1f}%")
-    if "slope_B" in out:
-        line(f"- Endpoint B (Kmax slope): {out['slope_B']:+.2f} D/year")
+
+    slope = out.get("slope_B", None)
+    if slope is None:
+        line("- Endpoint B (Kmax slope): N/A (Model B not fitted in deployed artifact)")
+    else:
+        line(f"- Endpoint B (Kmax slope): {float(slope):+.2f} D/year")
+
     if "tier_C" in out:
         line(f"- Tier (Endpoint C): {out['tier_C']}")
 
-    # Projections
     sp = out.get("slope_projection", {})
     if sp and isinstance(sp, dict):
         line("", dy=0.35 * cm)
@@ -200,7 +182,6 @@ def build_pdf_report(bundle: dict) -> bytes:
                 except Exception:
                     continue
 
-    # Flags
     flags = bundle.get("plausibility_flags", [])
     line("", dy=0.35 * cm)
     line("Plausibility flags", dy=0.65 * cm, font="Helvetica-Bold", size=12)
@@ -210,7 +191,6 @@ def build_pdf_report(bundle: dict) -> bytes:
     else:
         line("- None")
 
-    # Footer
     line("", dy=0.5 * cm)
     line("Disclaimer: This report is for research/educational use only.", dy=0.55 * cm, size=9)
     line("Do not use as a standalone basis for clinical decisions.", dy=0.55 * cm, size=9)
@@ -222,10 +202,41 @@ def build_pdf_report(bundle: dict) -> bytes:
 
 
 # -----------------------------
+# ✅ Helpers: fitted check for Model B (prevents NotFittedError crash)
+# -----------------------------
+from sklearn.utils.validation import check_is_fitted
+from sklearn.pipeline import Pipeline
+
+def is_fitted(est) -> bool:
+    try:
+        check_is_fitted(est)
+        return True
+    except Exception:
+        pass
+    if isinstance(est, Pipeline) and len(est.steps) > 0:
+        try:
+            check_is_fitted(est.steps[-1][1])
+            return True
+        except Exception:
+            return False
+    return False
+
+
+# -----------------------------
 # LOAD ASSETS
 # -----------------------------
+# Optional: fingerprint to force reload when files change (helps on Streamlit Cloud)
+base_dir = Path(__file__).resolve().parent
+paths_for_fp = [
+    resolve_paths(base_dir, MODEL_A_NAME),
+    resolve_paths(base_dir, MODEL_B_NAME),
+    resolve_paths(base_dir, MODEL_C_NAME),
+    resolve_paths(base_dir, META_NAME),
+]
+fingerprint = "|".join([f"{p.name}:{p.stat().st_mtime_ns if p.exists() else 'missing'}" for p in paths_for_fp])
+
 @st.cache_resource
-def load_assets(debug_flag=False):
+def load_assets(debug_flag=False, fingerprint: str = ""):
     base = Path(__file__).resolve().parent
 
     modelA_path = resolve_paths(base, MODEL_A_NAME)
@@ -248,7 +259,6 @@ def load_assets(debug_flag=False):
     modelB, trustedB, extraB = safe_skops_load(modelB_path, debug=debug_flag)
     modelC, trustedC, extraC = safe_skops_load(modelC_path, debug=debug_flag)
 
-    # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
             ohe = (
@@ -287,7 +297,10 @@ def load_assets(debug_flag=False):
 debug = st.sidebar.checkbox("Debug (paths & trusted types)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(debug_flag=debug)
+    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(
+        debug_flag=debug,
+        fingerprint=fingerprint
+    )
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
@@ -298,6 +311,18 @@ if debug:
     st.sidebar.json(used_paths)
     st.sidebar.write("Trusted report:")
     st.sidebar.json(trusted_report)
+
+# ✅ Check fitted status of Model B BEFORE prediction
+modelB_is_fitted = is_fitted(modelB)
+if debug:
+    st.sidebar.write("Model B fitted?")
+    st.sidebar.code(str(modelB_is_fitted))
+
+if not modelB_is_fitted:
+    st.warning(
+        "⚠️ Endpoint B (Kmax slope) is temporarily unavailable because Model B is not fitted in the deployed artifact. "
+        "Endpoints A and C still work and you can export PDF/JSON."
+    )
 
 
 # -----------------------------
@@ -356,7 +381,10 @@ if flags:
 # -----------------------------
 risk_A = float(modelA.predict_proba(X)[0, 1])
 risk_C = float(modelC.predict_proba(X)[0, 1])
-slope_B = float(modelB.predict(X)[0])
+
+slope_B = None
+if modelB_is_fitted:
+    slope_B = float(modelB.predict(X)[0])
 
 
 # -----------------------------
@@ -366,7 +394,10 @@ st.subheader("📊 Model outputs")
 c1, c2, c3 = st.columns(3)
 c1.metric("Endpoint A (ΔKmax progression)", f"{risk_A*100:.1f}%")
 c2.metric("Endpoint C (Composite risk)", f"{risk_C*100:.1f}%")
-c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
+if slope_B is None:
+    c3.metric("Endpoint B (Kmax slope)", "N/A")
+else:
+    c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
 
 st.subheader("🧠 Clinical interpretation (Endpoint C)")
 st.caption("Risk tiers: Low < 15% • Intermediate 15–35% • High ≥ 35%")
@@ -383,11 +414,10 @@ else:
 
 
 # -----------------------------
-# SLOPE PROJECTIONS (up to 5 years or stability)
+# SLOPE PROJECTIONS (up to 5 years or stability) — only if slope_B exists
 # -----------------------------
 st.subheader("📈 Endpoint B: projections (up to 5 years or stability)")
 
-# Optional: allow user to tune threshold in sidebar (kept conservative by default)
 st.sidebar.subheader("⚙️ Projection settings")
 STABILITY_THRESHOLD = st.sidebar.number_input(
     "Stability threshold |slope| < (D/year)",
@@ -398,38 +428,42 @@ STABILITY_THRESHOLD = st.sidebar.number_input(
 )
 MAX_YEARS = 5
 
-rows = []
-stable_assumed = abs(slope_B) < float(STABILITY_THRESHOLD)
+proj = None
+stable_assumed = None
 
-for year in range(1, MAX_YEARS + 1):
-    rows.append(
-        {"Year": year, "Projected ΔKmax (D)": year * slope_B, "Assumption": "Linear"}
-    )
-    if stable_assumed:
-        break  # stop early if stability assumed (operational)
-
-proj = pd.DataFrame(rows)
-
-st.dataframe(
-    proj.style.format({"Projected ΔKmax (D)": "{:+.2f}"}),
-    use_container_width=True,
-    hide_index=True,
-)
-
-if stable_assumed:
-    st.success(
-        f"🟢 Operational stability assumed (|slope| < {float(STABILITY_THRESHOLD):.2f} D/year). "
-        f"Projection truncated at year {int(proj['Year'].max())}."
-    )
+if slope_B is None:
+    st.info("Endpoint B projections are unavailable because Model B is not fitted in the deployed artifact.")
 else:
-    st.info(
-        f"Projection shown up to {MAX_YEARS} years (|slope| ≥ {float(STABILITY_THRESHOLD):.2f} D/year)."
+    rows = []
+    stable_assumed = abs(slope_B) < float(STABILITY_THRESHOLD)
+
+    for year in range(1, MAX_YEARS + 1):
+        rows.append({"Year": year, "Projected ΔKmax (D)": year * slope_B, "Assumption": "Linear"})
+        if stable_assumed:
+            break
+
+    proj = pd.DataFrame(rows)
+
+    st.dataframe(
+        proj.style.format({"Projected ΔKmax (D)": "{:+.2f}"}),
+        use_container_width=True,
+        hide_index=True,
     )
 
-st.caption(
-    "Notes: Projections are linear extrapolations based on Endpoint B (slope). "
-    "Stability is an operational definition for interpretability, not a mechanistic model."
-)
+    if stable_assumed:
+        st.success(
+            f"🟢 Operational stability assumed (|slope| < {float(STABILITY_THRESHOLD):.2f} D/year). "
+            f"Projection truncated at year {int(proj['Year'].max())}."
+        )
+    else:
+        st.info(
+            f"Projection shown up to {MAX_YEARS} years (|slope| ≥ {float(STABILITY_THRESHOLD):.2f} D/year)."
+        )
+
+    st.caption(
+        "Notes: Projections are linear extrapolations based on Endpoint B (slope). "
+        "Stability is an operational definition for interpretability, not a mechanistic model."
+    )
 
 
 # -----------------------------
@@ -451,24 +485,25 @@ bundle = {
     "outputs": {
         "risk_A": risk_A,
         "risk_C": risk_C,
-        "slope_B": slope_B,
+        "slope_B": slope_B,  # None if unavailable
         "tier_C": t,
         "tier_thresholds": {"low_lt": 0.15, "intermediate_lt": 0.35, "high_ge": 0.35},
-        "slope_projection": {
-            "method": "linear",
-            "stability_threshold_D_per_year": float(STABILITY_THRESHOLD),
-            "max_years": int(MAX_YEARS),
-            "stable_assumed": bool(stable_assumed),
-            "values": [
-                {"year": int(r["Year"]), "delta_kmax_D": float(r["Projected ΔKmax (D)"])}
-                for _, r in proj.iterrows()
-            ],
-        },
     },
     "plausibility_flags": flags,
 }
 
-# JSON download
+if slope_B is not None and proj is not None and stable_assumed is not None:
+    bundle["outputs"]["slope_projection"] = {
+        "method": "linear",
+        "stability_threshold_D_per_year": float(STABILITY_THRESHOLD),
+        "max_years": int(MAX_YEARS),
+        "stable_assumed": bool(stable_assumed),
+        "values": [
+            {"year": int(r["Year"]), "delta_kmax_D": float(r["Projected ΔKmax (D)"])}
+            for _, r in proj.iterrows()
+        ],
+    }
+
 st.download_button(
     label="Download JSON report",
     data=json.dumps(bundle, indent=2).encode("utf-8"),
@@ -476,7 +511,6 @@ st.download_button(
     mime="application/json",
 )
 
-# PDF download
 pdf_bytes = build_pdf_report(bundle)
 st.download_button(
     label="Download PDF report",
