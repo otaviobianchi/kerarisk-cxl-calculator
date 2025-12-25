@@ -1,10 +1,11 @@
 # app.py
 # KeraRisk-CXL Calculator (Streamlit)
 # - Robust skops loader (CVE-2024-37065 compatible)
-# - Optional meta (won't crash if missing)
+# - Meta optional (won't crash if missing OR if Streamlit Cloud snapshot is stale)
 # - Safe handling for Model B not fitted (won't crash)
 # - Cache fingerprint to avoid Streamlit Cloud stale artifacts
 # - Exports JSON + PDF report
+# - Endpoint B projections: Linear OR Damped exponential (non-linear, stabilizing)
 
 import json
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from io import BytesIO
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 import skops.io as sio
@@ -176,19 +178,16 @@ def build_pdf_report(bundle: dict) -> bytes:
                 c.showPage()
                 y = h - 2.2 * cm
 
-    # Header
     line("KeraRisk-CXL Calculator — Report", dy=0.75 * cm, font="Helvetica-Bold", size=14)
     line("Research use only — not a diagnostic device.", dy=0.75 * cm, font="Helvetica-Oblique", size=10)
     line(f"Generated (UTC): {bundle.get('timestamp_utc','')}", dy=0.8 * cm, size=10)
 
-    # Inputs
     line("Inputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     inp = bundle.get("inputs", {})
     for k in ["age", "kmax0", "pachy0", "bcva0", "cyl0", "group"]:
         if k in inp:
             line(f"- {k}: {inp[k]}")
 
-    # Outputs
     line("", dy=0.35 * cm)
     line("Model outputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     out = bundle.get("outputs", {})
@@ -207,17 +206,15 @@ def build_pdf_report(bundle: dict) -> bytes:
     if "tier_C" in out:
         line(f"- Tier (Endpoint C): {out['tier_C']}")
 
-    # Projections (optional)
     sp = out.get("slope_projection", None)
     if isinstance(sp, dict) and sp:
         line("", dy=0.35 * cm)
         line("Endpoint B — projections", dy=0.65 * cm, font="Helvetica-Bold", size=12)
         line(f"- Method: {sp.get('method','')}")
+        lam = sp.get("lambda", None)
+        if lam is not None:
+            line(f"- Damping rate λ (1/year): {float(lam):.2f}")
         line(f"- Max years: {sp.get('max_years','')}")
-        thr = sp.get("stability_threshold_D_per_year", None)
-        if thr is not None:
-            line(f"- Stability threshold: |slope| < {thr:.2f} D/year (operational)")
-        line(f"- Stability assumed: {bool(sp.get('stable_assumed', False))}")
 
         vals = sp.get("values", [])
         if isinstance(vals, list) and vals:
@@ -229,7 +226,6 @@ def build_pdf_report(bundle: dict) -> bytes:
                 except Exception:
                     continue
 
-    # Flags
     flags = bundle.get("plausibility_flags", [])
     line("", dy=0.35 * cm)
     line("Plausibility flags", dy=0.65 * cm, font="Helvetica-Bold", size=12)
@@ -239,7 +235,6 @@ def build_pdf_report(bundle: dict) -> bytes:
     else:
         line("- None")
 
-    # Footer
     line("", dy=0.5 * cm)
     line("Disclaimer: This report is for research/educational use only.", dy=0.55 * cm, size=9)
     line("Do not use as a standalone basis for clinical decisions.", dy=0.55 * cm, size=9)
@@ -254,7 +249,6 @@ def build_pdf_report(bundle: dict) -> bytes:
 # LOAD ASSETS (with cache fingerprint)
 # -----------------------------
 base_dir = Path(__file__).resolve().parent
-
 paths_for_fp = [
     resolve_paths(base_dir, MODEL_A_NAME),
     resolve_paths(base_dir, MODEL_B_NAME),
@@ -283,7 +277,7 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
             + f"\nAlso checked: {base/'assets'}"
         )
 
-    # Meta optional: load if present, else defaults
+    # Meta optional (use defaults if not found)
     if meta_path.exists():
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     else:
@@ -347,7 +341,7 @@ if debug:
     st.sidebar.write("Files seen in app root:")
     try:
         st.sidebar.code("\n".join(sorted([p.name for p in Path(used_paths["base"]).iterdir()])))
-    except Exception as _:
+    except Exception:
         pass
 
 # Model B fitted?
@@ -449,33 +443,47 @@ else:
 
 
 # -----------------------------
-# SLOPE PROJECTIONS (up to 5 years or stability)
+# Endpoint B: NON-LINEAR projections (Linear OR Damped Exponential)
 # -----------------------------
-st.subheader("📈 Endpoint B: projections (up to 5 years or stability)")
+st.subheader("📈 Endpoint B: projections (up to 5 years)")
 
 st.sidebar.subheader("⚙️ Projection settings")
-STABILITY_THRESHOLD = st.sidebar.number_input(
-    "Stability threshold |slope| < (D/year)",
-    min_value=0.05,
-    max_value=1.00,
-    value=0.25,
-    step=0.05,
+
+PROJ_METHOD = st.sidebar.selectbox(
+    "Projection model",
+    ["Linear (baseline)", "Damped exponential (recommended)"],
+    index=1,
+    help=(
+        "Linear: ΔK(t)=slope·t\n"
+        "Damped exponential: ΔK(t)=(slope/λ)·(1−e^(−λt)), converging to a plateau"
+    ),
 )
+
 MAX_YEARS = 5
 
+LAMBDA = None
+if PROJ_METHOD == "Damped exponential (recommended)":
+    LAMBDA = st.sidebar.number_input(
+        "Damping rate λ (1/year)",
+        min_value=0.1,
+        max_value=2.0,
+        value=0.6,
+        step=0.1,
+        help="Higher λ → faster stabilization after CXL",
+    )
+
 proj = None
-stable_assumed = None
 
 if slope_B is None:
     st.info("Endpoint B projections are unavailable because Model B is not fitted in the deployed artifact.")
 else:
     rows = []
-    stable_assumed = abs(slope_B) < float(STABILITY_THRESHOLD)
-
     for year in range(1, MAX_YEARS + 1):
-        rows.append({"Year": year, "Projected ΔKmax (D)": year * slope_B, "Assumption": "Linear"})
-        if stable_assumed:
-            break
+        if PROJ_METHOD == "Linear (baseline)":
+            delta = slope_B * year
+        else:
+            delta = (slope_B / float(LAMBDA)) * (1.0 - np.exp(-float(LAMBDA) * year))
+        rows.append({"Year": year, "Projected ΔKmax (D)": delta, "Projection model": PROJ_METHOD})
 
     proj = pd.DataFrame(rows)
 
@@ -485,19 +493,10 @@ else:
         hide_index=True,
     )
 
-    if stable_assumed:
-        st.success(
-            f"🟢 Operational stability assumed (|slope| < {float(STABILITY_THRESHOLD):.2f} D/year). "
-            f"Projection truncated at year {int(proj['Year'].max())}."
-        )
-    else:
-        st.info(
-            f"Projection shown up to {MAX_YEARS} years (|slope| ≥ {float(STABILITY_THRESHOLD):.2f} D/year)."
-        )
-
     st.caption(
-        "Notes: Projections are linear extrapolations based on Endpoint B (slope). "
-        "Stability is an operational definition for interpretability, not a mechanistic model."
+        "Non-linear projection shown when selected. "
+        "The damped exponential model assumes progressive stabilization and "
+        "should not be interpreted as a deterministic forecast."
     )
 
 
@@ -527,12 +526,11 @@ bundle = {
     "plausibility_flags": flags,
 }
 
-if slope_B is not None and proj is not None and stable_assumed is not None:
+if slope_B is not None and proj is not None:
     bundle["outputs"]["slope_projection"] = {
-        "method": "linear",
-        "stability_threshold_D_per_year": float(STABILITY_THRESHOLD),
+        "method": PROJ_METHOD,
+        "lambda": float(LAMBDA) if LAMBDA is not None else None,
         "max_years": int(MAX_YEARS),
-        "stable_assumed": bool(stable_assumed),
         "values": [
             {"year": int(r["Year"]), "delta_kmax_D": float(r["Projected ΔKmax (D)"])}
             for _, r in proj.iterrows()
