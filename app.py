@@ -1,4 +1,10 @@
-# app.py  (UPDATED: handle NotFitted modelB without crashing + optional cache fingerprint)
+# app.py
+# KeraRisk-CXL Calculator (Streamlit)
+# - Robust skops loader (CVE-2024-37065 compatible)
+# - Optional meta (won't crash if missing)
+# - Safe handling for Model B not fitted (won't crash)
+# - Cache fingerprint to avoid Streamlit Cloud stale artifacts
+# - Exports JSON + PDF report
 
 import json
 import re
@@ -14,6 +20,9 @@ import skops.io as sio
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
+
+from sklearn.utils.validation import check_is_fitted
+from sklearn.pipeline import Pipeline
 
 
 # -----------------------------
@@ -51,6 +60,14 @@ def resolve_paths(base: Path, filename: str) -> Path:
 # Helpers: skops safe load (CVE-2024-37065 compatible)
 # -----------------------------
 def _extract_untrusted_types_from_message(msg: str) -> list[str]:
+    """
+    skops may report untrusted types in different formats:
+    - "Untrusted types found in the file: ['a.b.Type', 'c.d.Other']"
+    - multiline list with hyphens:
+        Untrusted types found in the file:
+        - a.b.Type
+        - c.d.Other
+    """
     m = re.search(r"Untrusted types found in the file:\s*(\[[\s\S]*\])", msg)
     if m:
         try:
@@ -64,6 +81,14 @@ def _extract_untrusted_types_from_message(msg: str) -> list[str]:
 
 
 def safe_skops_load(path: Path, debug=False):
+    """
+    Safe loader for skops >= 0.10:
+    - trusted MUST be list[str]
+    - NEVER uses trusted=True
+    - NEVER calls get_untrusted_types(path)
+    Strategy:
+      try baseline trusted list; if blocked, parse required types from exception and retry.
+    """
     trusted_base = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
@@ -100,6 +125,24 @@ def safe_skops_load(path: Path, debug=False):
 
 
 # -----------------------------
+# Helpers: fitted check (prevents NotFittedError crashes)
+# -----------------------------
+def is_fitted(est) -> bool:
+    try:
+        check_is_fitted(est)
+        return True
+    except Exception:
+        pass
+    if isinstance(est, Pipeline) and len(est.steps) > 0:
+        try:
+            check_is_fitted(est.steps[-1][1])
+            return True
+        except Exception:
+            return False
+    return False
+
+
+# -----------------------------
 # Helpers: risk tier
 # -----------------------------
 def tier(p: float) -> str:
@@ -116,7 +159,7 @@ def tier(p: float) -> str:
 def build_pdf_report(bundle: dict) -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    w, h = A4
+    _, h = A4
 
     left = 2.0 * cm
     y = h - 2.2 * cm
@@ -125,7 +168,7 @@ def build_pdf_report(bundle: dict) -> bytes:
         nonlocal y
         c.setFont(font, size)
         max_chars = 110
-        chunks = [text[i:i + max_chars] for i in range(0, len(text), max_chars)] or [""]
+        chunks = [text[i : i + max_chars] for i in range(0, len(text), max_chars)] or [""]
         for ch in chunks:
             c.drawString(left, y, ch)
             y -= dy
@@ -133,16 +176,19 @@ def build_pdf_report(bundle: dict) -> bytes:
                 c.showPage()
                 y = h - 2.2 * cm
 
+    # Header
     line("KeraRisk-CXL Calculator — Report", dy=0.75 * cm, font="Helvetica-Bold", size=14)
     line("Research use only — not a diagnostic device.", dy=0.75 * cm, font="Helvetica-Oblique", size=10)
     line(f"Generated (UTC): {bundle.get('timestamp_utc','')}", dy=0.8 * cm, size=10)
 
+    # Inputs
     line("Inputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     inp = bundle.get("inputs", {})
     for k in ["age", "kmax0", "pachy0", "bcva0", "cyl0", "group"]:
         if k in inp:
             line(f"- {k}: {inp[k]}")
 
+    # Outputs
     line("", dy=0.35 * cm)
     line("Model outputs", dy=0.65 * cm, font="Helvetica-Bold", size=12)
     out = bundle.get("outputs", {})
@@ -161,16 +207,17 @@ def build_pdf_report(bundle: dict) -> bytes:
     if "tier_C" in out:
         line(f"- Tier (Endpoint C): {out['tier_C']}")
 
-    sp = out.get("slope_projection", {})
-    if sp and isinstance(sp, dict):
+    # Projections (optional)
+    sp = out.get("slope_projection", None)
+    if isinstance(sp, dict) and sp:
         line("", dy=0.35 * cm)
         line("Endpoint B — projections", dy=0.65 * cm, font="Helvetica-Bold", size=12)
-        line(f"- Method: {sp.get('method','')}", dy=0.55 * cm)
-        line(f"- Max years: {sp.get('max_years','')}", dy=0.55 * cm)
+        line(f"- Method: {sp.get('method','')}")
+        line(f"- Max years: {sp.get('max_years','')}")
         thr = sp.get("stability_threshold_D_per_year", None)
         if thr is not None:
-            line(f"- Stability threshold: |slope| < {thr:.2f} D/year (operational)", dy=0.55 * cm)
-        line(f"- Stability assumed: {bool(sp.get('stable_assumed', False))}", dy=0.55 * cm)
+            line(f"- Stability threshold: |slope| < {thr:.2f} D/year (operational)")
+        line(f"- Stability assumed: {bool(sp.get('stable_assumed', False))}")
 
         vals = sp.get("values", [])
         if isinstance(vals, list) and vals:
@@ -178,10 +225,11 @@ def build_pdf_report(bundle: dict) -> bytes:
                 try:
                     yy = int(v.get("year"))
                     dk = float(v.get("delta_kmax_D"))
-                    line(f"  • Year {yy}: ΔKmax {dk:+.2f} D", dy=0.55 * cm)
+                    line(f"  • Year {yy}: ΔKmax {dk:+.2f} D")
                 except Exception:
                     continue
 
+    # Flags
     flags = bundle.get("plausibility_flags", [])
     line("", dy=0.35 * cm)
     line("Plausibility flags", dy=0.65 * cm, font="Helvetica-Bold", size=12)
@@ -191,6 +239,7 @@ def build_pdf_report(bundle: dict) -> bytes:
     else:
         line("- None")
 
+    # Footer
     line("", dy=0.5 * cm)
     line("Disclaimer: This report is for research/educational use only.", dy=0.55 * cm, size=9)
     line("Do not use as a standalone basis for clinical decisions.", dy=0.55 * cm, size=9)
@@ -202,31 +251,10 @@ def build_pdf_report(bundle: dict) -> bytes:
 
 
 # -----------------------------
-# ✅ Helpers: fitted check for Model B (prevents NotFittedError crash)
+# LOAD ASSETS (with cache fingerprint)
 # -----------------------------
-from sklearn.utils.validation import check_is_fitted
-from sklearn.pipeline import Pipeline
-
-def is_fitted(est) -> bool:
-    try:
-        check_is_fitted(est)
-        return True
-    except Exception:
-        pass
-    if isinstance(est, Pipeline) and len(est.steps) > 0:
-        try:
-            check_is_fitted(est.steps[-1][1])
-            return True
-        except Exception:
-            return False
-    return False
-
-
-# -----------------------------
-# LOAD ASSETS
-# -----------------------------
-# Optional: fingerprint to force reload when files change (helps on Streamlit Cloud)
 base_dir = Path(__file__).resolve().parent
+
 paths_for_fp = [
     resolve_paths(base_dir, MODEL_A_NAME),
     resolve_paths(base_dir, MODEL_B_NAME),
@@ -234,6 +262,7 @@ paths_for_fp = [
     resolve_paths(base_dir, META_NAME),
 ]
 fingerprint = "|".join([f"{p.name}:{p.stat().st_mtime_ns if p.exists() else 'missing'}" for p in paths_for_fp])
+
 
 @st.cache_resource
 def load_assets(debug_flag=False, fingerprint: str = ""):
@@ -244,28 +273,35 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
     modelC_path = resolve_paths(base, MODEL_C_NAME)
     meta_path = resolve_paths(base, META_NAME)
 
-    missing = [p for p in [modelA_path, modelB_path, modelC_path, meta_path] if not p.exists()]
-    if missing:
+    # Require models (meta optional)
+    missing_models = [p for p in [modelA_path, modelB_path, modelC_path] if not p.exists()]
+    if missing_models:
         raise FileNotFoundError(
-            "Missing required file(s):\n"
-            + "\n".join([f"- {p.name} (expected at: {p})" for p in missing])
+            "Missing required model file(s):\n"
+            + "\n".join([f"- {p.name} (expected at: {p})" for p in missing_models])
             + f"\n\nBase directory: {base}"
             + f"\nAlso checked: {base/'assets'}"
         )
 
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    # Meta optional: load if present, else defaults
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    else:
+        meta = {
+            "name": "KeraRisk-CXL",
+            "version": "1.0",
+            "groups": [],
+            "notes": "Research use only — not a diagnostic device.",
+        }
 
     modelA, trustedA, extraA = safe_skops_load(modelA_path, debug=debug_flag)
     modelB, trustedB, extraB = safe_skops_load(modelB_path, debug=debug_flag)
     modelC, trustedC, extraC = safe_skops_load(modelC_path, debug=debug_flag)
 
+    # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
-            ohe = (
-                modelC.named_steps["pre"]
-                .named_transformers_["cat"]
-                .named_steps["oh"]
-            )
+            ohe = modelC.named_steps["pre"].named_transformers_["cat"].named_steps["oh"]
             meta["groups"] = [str(x) for x in list(ohe.categories_[0])]
         except Exception:
             meta["groups"] = ["FRAK", "FRAKcross"]
@@ -297,10 +333,7 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
 debug = st.sidebar.checkbox("Debug (paths & trusted types)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(
-        debug_flag=debug,
-        fingerprint=fingerprint
-    )
+    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(debug_flag=debug, fingerprint=fingerprint)
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
@@ -311,8 +344,13 @@ if debug:
     st.sidebar.json(used_paths)
     st.sidebar.write("Trusted report:")
     st.sidebar.json(trusted_report)
+    st.sidebar.write("Files seen in app root:")
+    try:
+        st.sidebar.code("\n".join(sorted([p.name for p in Path(used_paths["base"]).iterdir()])))
+    except Exception as _:
+        pass
 
-# ✅ Check fitted status of Model B BEFORE prediction
+# Model B fitted?
 modelB_is_fitted = is_fitted(modelB)
 if debug:
     st.sidebar.write("Model B fitted?")
@@ -394,10 +432,7 @@ st.subheader("📊 Model outputs")
 c1, c2, c3 = st.columns(3)
 c1.metric("Endpoint A (ΔKmax progression)", f"{risk_A*100:.1f}%")
 c2.metric("Endpoint C (Composite risk)", f"{risk_C*100:.1f}%")
-if slope_B is None:
-    c3.metric("Endpoint B (Kmax slope)", "N/A")
-else:
-    c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
+c3.metric("Endpoint B (Kmax slope)", "N/A" if slope_B is None else f"{slope_B:+.2f} D/year")
 
 st.subheader("🧠 Clinical interpretation (Endpoint C)")
 st.caption("Risk tiers: Low < 15% • Intermediate 15–35% • High ≥ 35%")
@@ -414,7 +449,7 @@ else:
 
 
 # -----------------------------
-# SLOPE PROJECTIONS (up to 5 years or stability) — only if slope_B exists
+# SLOPE PROJECTIONS (up to 5 years or stability)
 # -----------------------------
 st.subheader("📈 Endpoint B: projections (up to 5 years or stability)")
 
@@ -473,7 +508,7 @@ st.subheader("⬇️ Export (audit bundle)")
 
 bundle = {
     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-    "app": {"name": "KeraRisk-CXL", "purpose": "Research use only"},
+    "app": {"name": meta.get("name", "KeraRisk-CXL"), "purpose": "Research use only"},
     "inputs": {
         "age": float(age),
         "kmax0": float(kmax0),
