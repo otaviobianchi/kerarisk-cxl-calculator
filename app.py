@@ -15,26 +15,55 @@ st.caption("Research use only — not a diagnostic device.")
 
 
 # -----------------------------
-# LOAD ASSETS (NO UI HERE)
+# CONFIG: FILENAMES
+# (Expected in repo ROOT, same folder as app.py)
+# -----------------------------
+MODEL_A_NAME = "KeraRisk_modelA.skops"
+MODEL_B_NAME = "KeraRisk_modelB.skops"
+MODEL_C_NAME = "KeraRisk_modelC.skops"
+META_NAME    = "kerarisk_meta.json"
+
+
+# -----------------------------
+# LOAD ASSETS (NO UI INSIDE CACHE)
+# Looks in ROOT first; if not found, tries assets/
 # -----------------------------
 @st.cache_resource
 def load_assets():
     base = Path(__file__).resolve().parent
-    assets = base / "assets"
 
-    modelA_path = assets / "KeraRisk_modelA.skops"
-    modelB_path = assets / "KeraRisk_modelB.skops"
-    modelC_path = assets / "KeraRisk_modelC.skops"
-    meta_path   = assets / "kerarisk_meta.json"
+    # 1) Prefer ROOT (repo root where app.py lives)
+    root_dir = base
+
+    # 2) Fallback to assets/ if user later creates it
+    assets_dir = base / "assets"
+
+    def resolve_file(filename: str) -> Path:
+        p1 = root_dir / filename
+        if p1.exists():
+            return p1
+        p2 = assets_dir / filename
+        if p2.exists():
+            return p2
+        # If none exists, return expected root path for a clean error message
+        return p1
+
+    modelA_path = resolve_file(MODEL_A_NAME)
+    modelB_path = resolve_file(MODEL_B_NAME)
+    modelC_path = resolve_file(MODEL_C_NAME)
+    meta_path   = resolve_file(META_NAME)
 
     # hard checks
-    if not assets.exists():
-        raise FileNotFoundError(f"assets/ not found at: {assets}")
+    missing = [p for p in [modelA_path, modelB_path, modelC_path, meta_path] if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing required file(s):\n"
+            + "\n".join([f"- {p.name} (looked in: {p.parent})" for p in missing])
+            + f"\n\nBase directory: {base}"
+            + f"\nAlso checked: {assets_dir}"
+        )
 
-    for p in [modelA_path, modelB_path, modelC_path, meta_path]:
-        if not p.exists():
-            raise FileNotFoundError(f"Missing file: {p}")
-
+    # Trusted types for skops safe loading
     trusted = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
@@ -52,37 +81,60 @@ def load_assets():
 
     meta = json.loads(meta_path.read_text())
 
-    # fallback: if meta doesn't have groups, infer from training categories
+    # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
-            # works if OneHotEncoder was used on "group"
-            ohe = modelC.named_steps["pre"].named_transformers_["cat"].named_steps["oh"]
-            meta["groups"] = list(ohe.categories_[0])
+            # If pipeline has pre -> cat -> oh, infer categories
+            ohe = (
+                modelC.named_steps["pre"]
+                      .named_transformers_["cat"]
+                      .named_steps["oh"]
+            )
+            meta["groups"] = [str(x) for x in list(ohe.categories_[0])]
         except Exception:
-            meta["groups"] = ["FRAK", "FRAKcross"]  # safe fallback
+            meta["groups"] = ["FRAK", "FRAKcross"]
 
-    return modelA, modelB, modelC, meta, assets
+    # Return also paths used (for debug display)
+    used_paths = {
+        "modelA": str(modelA_path),
+        "modelB": str(modelB_path),
+        "modelC": str(modelC_path),
+        "meta": str(meta_path),
+        "base": str(base),
+        "assets_dir": str(assets_dir),
+    }
+
+    return modelA, modelB, modelC, meta, used_paths
 
 
 # -----------------------------
-# SAFE LOADING WRAPPER + DEBUG UI
+# SAFE LOADING WRAPPER + DEBUG
 # -----------------------------
-debug = st.sidebar.checkbox("Debug (show assets)", value=False)
+debug = st.sidebar.checkbox("Debug (show file paths)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, assets_dir = load_assets()
+    modelA, modelB, modelC, meta, used_paths = load_assets()
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
     st.stop()
 
 if debug:
-    st.sidebar.write("Base:", Path(__file__).resolve().parent)
-    st.sidebar.write("Assets:", assets_dir)
-    st.sidebar.write("Files:", sorted([p.name for p in assets_dir.iterdir()]))
+    st.sidebar.write("Resolved paths:")
+    st.sidebar.json(used_paths)
+    base = Path(used_paths["base"])
+    st.sidebar.write("Files in base:")
+    st.sidebar.write(sorted([p.name for p in base.iterdir() if p.is_file()]))
+    assets_dir = Path(used_paths["assets_dir"])
+    if assets_dir.exists():
+        st.sidebar.write("Files in assets/:")
+        st.sidebar.write(sorted([p.name for p in assets_dir.iterdir() if p.is_file()]))
+    else:
+        st.sidebar.write("assets/ folder does not exist (OK).")
+
 
 # -----------------------------
-# INPUTS (UI ONLY HERE)
+# INPUTS
 # -----------------------------
 st.sidebar.header("📥 Patient baseline data")
 
@@ -123,7 +175,7 @@ c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
 
 st.subheader("🧠 Clinical interpretation (Endpoint C)")
 
-def tier(p):
+def tier(p: float) -> str:
     if p < 0.15:
         return "Low"
     if p < 0.35:
@@ -142,6 +194,7 @@ else:
 
 st.markdown("---")
 st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical deployment.")
+
 
 
 
