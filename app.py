@@ -1,59 +1,39 @@
-# ============================================================
-# KeraRisk-CXL — Online Risk Calculator (Streamlit App)
-# Uses trained models saved as .skops
-# Endpoints:
-#   A — ΔKmax progression
-#   B — Kmax slope (D/year)
-#   C — Composite clinical endpoint
-# ============================================================
-
-import streamlit as st
-import skops.io as sio
 import json
-import pandas as pd
 from pathlib import Path
 
-# ------------------------------------------------------------
-# PAGE CONFIG
-# ------------------------------------------------------------
-st.set_page_config(
-    page_title="KeraRisk-CXL Calculator",
-    layout="centered"
-)
+import pandas as pd
+import streamlit as st
+import skops.io as sio
 
+
+# -----------------------------
+# PAGE
+# -----------------------------
+st.set_page_config(page_title="KeraRisk-CXL Calculator", layout="centered")
 st.title("🩺 KeraRisk-CXL Calculator")
-st.markdown(
-    """
-Clinical decision-support tool for **risk stratification and progression modeling in keratoconus**,  
-based on baseline tomographic and functional parameters.
-"""
-)
+st.caption("Research use only — not a diagnostic device.")
 
-# ------------------------------------------------------------
-# LOAD MODELS + METADATA (SAFE)
-# ------------------------------------------------------------
+
+# -----------------------------
+# LOAD ASSETS (NO UI HERE)
+# -----------------------------
 @st.cache_resource
 def load_assets():
-    base = Path(__file__).parent
+    base = Path(__file__).resolve().parent
     assets = base / "assets"
-
-    # ---- Debug (can remove later)
-    st.write("📂 Assets directory:", assets.resolve())
-    if not assets.exists():
-        st.error("❌ Assets directory not found")
-        st.stop()
-
-    st.write("📄 Files found:", [p.name for p in assets.iterdir()])
 
     modelA_path = assets / "KeraRisk_modelA.skops"
     modelB_path = assets / "KeraRisk_modelB.skops"
     modelC_path = assets / "KeraRisk_modelC.skops"
     meta_path   = assets / "kerarisk_meta.json"
 
+    # hard checks
+    if not assets.exists():
+        raise FileNotFoundError(f"assets/ not found at: {assets}")
+
     for p in [modelA_path, modelB_path, modelC_path, meta_path]:
         if not p.exists():
-            st.error(f"❌ Missing file: {p.name}")
-            st.stop()
+            raise FileNotFoundError(f"Missing file: {p}")
 
     trusted = [
         "sklearn.pipeline.Pipeline",
@@ -70,98 +50,98 @@ def load_assets():
     modelB = sio.load(modelB_path, trusted=trusted)
     modelC = sio.load(modelC_path, trusted=trusted)
 
-    with open(meta_path, "r") as f:
-        meta = json.load(f)
+    meta = json.loads(meta_path.read_text())
 
-    return modelA, modelB, modelC, meta
+    # fallback: if meta doesn't have groups, infer from training categories
+    if "groups" not in meta or not meta["groups"]:
+        try:
+            # works if OneHotEncoder was used on "group"
+            ohe = modelC.named_steps["pre"].named_transformers_["cat"].named_steps["oh"]
+            meta["groups"] = list(ohe.categories_[0])
+        except Exception:
+            meta["groups"] = ["FRAK", "FRAKcross"]  # safe fallback
+
+    return modelA, modelB, modelC, meta, assets
 
 
-modelA, modelB, modelC, meta = load_assets()
+# -----------------------------
+# SAFE LOADING WRAPPER + DEBUG UI
+# -----------------------------
+debug = st.sidebar.checkbox("Debug (show assets)", value=False)
 
-# ------------------------------------------------------------
-# SIDEBAR — INPUTS
-# ------------------------------------------------------------
+try:
+    modelA, modelB, modelC, meta, assets_dir = load_assets()
+except Exception as e:
+    st.error("❌ Failed to load models/assets.")
+    st.code(str(e))
+    st.stop()
+
+if debug:
+    st.sidebar.write("Base:", Path(__file__).resolve().parent)
+    st.sidebar.write("Assets:", assets_dir)
+    st.sidebar.write("Files:", sorted([p.name for p in assets_dir.iterdir()]))
+
+# -----------------------------
+# INPUTS (UI ONLY HERE)
+# -----------------------------
 st.sidebar.header("📥 Patient baseline data")
 
-age = st.sidebar.number_input("Age (years)", 8, 80, 18)
-kmax0 = st.sidebar.number_input("Kmax (D)", 40.0, 90.0, 55.0, step=0.1)
-pachy0 = st.sidebar.number_input("Minimum pachymetry (µm)", 300, 600, 450)
-bcva0 = st.sidebar.number_input("BCVA (decimal)", 0.0, 1.2, 0.8, step=0.05)
-cyl0 = st.sidebar.number_input("Cylinder (D)", 0.0, 15.0, 4.0, step=0.25)
+age = st.sidebar.number_input("Age (years)", min_value=8, max_value=80, value=18)
+kmax0 = st.sidebar.number_input("Kmax (D)", min_value=40.0, max_value=90.0, value=55.0, step=0.1)
+pachy0 = st.sidebar.number_input("Minimum pachymetry (µm)", min_value=300, max_value=650, value=450)
+bcva0 = st.sidebar.number_input("BCVA (decimal)", min_value=0.0, max_value=1.2, value=0.8, step=0.05)
+cyl0 = st.sidebar.number_input("Cylinder (D)", min_value=0.0, max_value=20.0, value=4.0, step=0.25)
+
 group = st.sidebar.selectbox("Treatment group", meta["groups"])
 
 X = pd.DataFrame([{
-    "age": age,
-    "kmax0": kmax0,
-    "pachy0": pachy0,
-    "bcva0": bcva0,
-    "cyl0": cyl0,
-    "group": group
+    "age": float(age),
+    "kmax0": float(kmax0),
+    "pachy0": float(pachy0),
+    "bcva0": float(bcva0),
+    "cyl0": float(cyl0),
+    "group": str(group),
 }])
 
-# ------------------------------------------------------------
+
+# -----------------------------
 # PREDICTIONS
-# ------------------------------------------------------------
+# -----------------------------
 risk_A = float(modelA.predict_proba(X)[0, 1])
 risk_C = float(modelC.predict_proba(X)[0, 1])
 slope_B = float(modelB.predict(X)[0])
 
-# ------------------------------------------------------------
+
+# -----------------------------
 # OUTPUTS
-# ------------------------------------------------------------
+# -----------------------------
 st.subheader("📊 Model outputs")
+c1, c2, c3 = st.columns(3)
+c1.metric("Endpoint A (ΔKmax progression)", f"{risk_A*100:.1f}%")
+c2.metric("Endpoint C (Composite risk)", f"{risk_C*100:.1f}%")
+c3.metric("Endpoint B (Kmax slope)", f"{slope_B:+.2f} D/year")
 
-col1, col2, col3 = st.columns(3)
+st.subheader("🧠 Clinical interpretation (Endpoint C)")
 
-with col1:
-    st.metric(
-        "Endpoint A\nΔKmax progression",
-        f"{risk_A*100:.1f} %",
-    )
-
-with col2:
-    st.metric(
-        "Endpoint C\nComposite risk",
-        f"{risk_C*100:.1f} %",
-    )
-
-with col3:
-    st.metric(
-        "Endpoint B\nKmax slope",
-        f"{slope_B:+.2f} D/year",
-    )
-
-# ------------------------------------------------------------
-# RISK INTERPRETATION
-# ------------------------------------------------------------
-st.subheader("🧠 Clinical interpretation")
-
-def risk_tier(p):
+def tier(p):
     if p < 0.15:
         return "Low"
-    elif p < 0.35:
+    if p < 0.35:
         return "Intermediate"
-    else:
-        return "High"
+    return "High"
 
-tier = risk_tier(risk_C)
+t = tier(risk_C)
+st.markdown(f"### **{t} risk**")
 
-st.markdown(f"### **{tier} risk**")
-
-if tier == "High":
-    st.warning("⚠️ High risk of clinical progression. Consider close monitoring or early intervention.")
-elif tier == "Intermediate":
-    st.info("ℹ️ Intermediate risk. Regular follow-up recommended.")
+if t == "High":
+    st.warning("⚠️ High risk of clinical progression. Consider closer monitoring / earlier intervention.")
+elif t == "Intermediate":
+    st.info("ℹ️ Intermediate risk. Consider 6–12 month follow-up.")
 else:
     st.success("✅ Low risk. Standard follow-up may be sufficient.")
 
-# ------------------------------------------------------------
-# FOOTER
-# ------------------------------------------------------------
 st.markdown("---")
-st.caption(
-    "KeraRisk-CXL | Research use only — not a diagnostic device. "
-    "Model trained and validated as described in the associated manuscript."
-)
+st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical deployment.")
+
 
 
