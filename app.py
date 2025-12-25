@@ -1,6 +1,6 @@
 # ============================================================
 # KeraRisk-CXL — Online Risk Calculator (Streamlit App)
-# Uses trained models saved as .skops (safe & portable)
+# Uses trained models saved as .skops
 # Endpoints:
 #   A — ΔKmax progression
 #   B — Kmax slope (D/year)
@@ -10,22 +10,41 @@
 import streamlit as st
 import skops.io as sio
 import json
+import pandas as pd
 from pathlib import Path
 
+# ------------------------------------------------------------
+# PAGE CONFIG
+# ------------------------------------------------------------
+st.set_page_config(
+    page_title="KeraRisk-CXL Calculator",
+    layout="centered"
+)
+
+st.title("🩺 KeraRisk-CXL Calculator")
+st.markdown(
+    """
+Clinical decision-support tool for **risk stratification and progression modeling in keratoconus**,  
+based on baseline tomographic and functional parameters.
+"""
+)
+
+# ------------------------------------------------------------
+# LOAD MODELS + METADATA (SAFE)
+# ------------------------------------------------------------
 @st.cache_resource
 def load_assets():
     base = Path(__file__).parent
     assets = base / "assets"
 
-    # Debug visual (remova depois se quiser)
-    st.write("📂 Assets directory:", assets)
+    # ---- Debug (can remove later)
+    st.write("📂 Assets directory:", assets.resolve())
     if not assets.exists():
         st.error("❌ Assets directory not found")
         st.stop()
 
     st.write("📄 Files found:", [p.name for p in assets.iterdir()])
 
-    # Expected files
     modelA_path = assets / "KeraRisk_modelA.skops"
     modelB_path = assets / "KeraRisk_modelB.skops"
     modelC_path = assets / "KeraRisk_modelC.skops"
@@ -39,9 +58,9 @@ def load_assets():
     trusted = [
         "sklearn.pipeline.Pipeline",
         "sklearn.compose._column_transformer.ColumnTransformer",
+        "sklearn.impute._base.SimpleImputer",
         "sklearn.preprocessing._encoders.OneHotEncoder",
         "sklearn.preprocessing._data.StandardScaler",
-        "sklearn.impute._base.SimpleImputer",
         "sklearn.linear_model._logistic.LogisticRegression",
         "sklearn.linear_model._coordinate_descent.ElasticNet",
         "numpy.ndarray",
@@ -52,47 +71,6 @@ def load_assets():
     modelC = sio.load(modelC_path, trusted=trusted)
 
     with open(meta_path, "r") as f:
-        meta = json.load(f)
-
-    return modelA, modelB, modelC, meta
-
-
-# ------------------------------------------------------------
-# PAGE CONFIG
-# ------------------------------------------------------------
-st.set_page_config(
-    page_title="KeraRisk-CXL Calculator",
-    layout="centered"
-)
-
-st.title("🩺 KeraRisk-CXL Calculator")
-st.markdown(
-    """
-Clinical decision-support tool for **risk stratification and progression modeling in keratoconus**  
-based on baseline tomographic and functional parameters.
-"""
-)
-
-# ------------------------------------------------------------
-# LOAD MODELS + METADATA
-# ------------------------------------------------------------
-@st.cache_resource
-def load_assets():
-    trusted = [
-        "sklearn.pipeline.Pipeline",
-        "sklearn.compose._column_transformer.ColumnTransformer",
-        "sklearn.impute._base.SimpleImputer",
-        "sklearn.preprocessing._encoders.OneHotEncoder",
-        "sklearn.preprocessing._data.StandardScaler",
-        "sklearn.linear_model._logistic.LogisticRegression",
-        "sklearn.linear_model._coordinate_descent.ElasticNet",
-    ]
-
-    modelA = sio.load("assets/KeraRisk_modelA.skops", trusted=trusted)
-    modelB = sio.load("assets/KeraRisk_modelB.skops", trusted=trusted)
-    modelC = sio.load("assets/KeraRisk_modelC.skops", trusted=trusted)
-
-    with open("assets/kerarisk_meta.json", "r") as f:
         meta = json.load(f)
 
     return modelA, modelB, modelC, meta
@@ -139,21 +117,18 @@ with col1:
     st.metric(
         "Endpoint A\nΔKmax progression",
         f"{risk_A*100:.1f} %",
-        help="Probability of ΔKmax ≥ threshold within 5 years"
     )
 
 with col2:
     st.metric(
         "Endpoint C\nComposite risk",
         f"{risk_C*100:.1f} %",
-        help="Composite endpoint: ΔKmax / BCVA / Cylinder"
     )
 
 with col3:
     st.metric(
         "Endpoint B\nKmax slope",
         f"{slope_B:+.2f} D/year",
-        help="Predicted annual Kmax progression rate"
     )
 
 # ------------------------------------------------------------
@@ -171,12 +146,7 @@ def risk_tier(p):
 
 tier = risk_tier(risk_C)
 
-st.markdown(
-    f"""
-**Composite risk category (Endpoint C):**  
-### **{tier} risk**
-"""
-)
+st.markdown(f"### **{tier} risk**")
 
 if tier == "High":
     st.warning("⚠️ High risk of clinical progression. Consider close monitoring or early intervention.")
@@ -193,6 +163,5 @@ st.caption(
     "KeraRisk-CXL | Research use only — not a diagnostic device. "
     "Model trained and validated as described in the associated manuscript."
 )
-
 
 
