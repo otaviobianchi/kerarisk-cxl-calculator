@@ -8,10 +8,54 @@
 # ============================================================
 
 import streamlit as st
-import pandas as pd
-import numpy as np
 import skops.io as sio
 import json
+from pathlib import Path
+
+@st.cache_resource
+def load_assets():
+    base = Path(__file__).parent
+    assets = base / "assets"
+
+    # Debug visual (remova depois se quiser)
+    st.write("📂 Assets directory:", assets)
+    if not assets.exists():
+        st.error("❌ Assets directory not found")
+        st.stop()
+
+    st.write("📄 Files found:", [p.name for p in assets.iterdir()])
+
+    # Expected files
+    modelA_path = assets / "KeraRisk_modelA.skops"
+    modelB_path = assets / "KeraRisk_modelB.skops"
+    modelC_path = assets / "KeraRisk_modelC.skops"
+    meta_path   = assets / "kerarisk_meta.json"
+
+    for p in [modelA_path, modelB_path, modelC_path, meta_path]:
+        if not p.exists():
+            st.error(f"❌ Missing file: {p.name}")
+            st.stop()
+
+    trusted = [
+        "sklearn.pipeline.Pipeline",
+        "sklearn.compose._column_transformer.ColumnTransformer",
+        "sklearn.preprocessing._encoders.OneHotEncoder",
+        "sklearn.preprocessing._data.StandardScaler",
+        "sklearn.impute._base.SimpleImputer",
+        "sklearn.linear_model._logistic.LogisticRegression",
+        "sklearn.linear_model._coordinate_descent.ElasticNet",
+        "numpy.ndarray",
+    ]
+
+    modelA = sio.load(modelA_path, trusted=trusted)
+    modelB = sio.load(modelB_path, trusted=trusted)
+    modelC = sio.load(modelC_path, trusted=trusted)
+
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+
+    return modelA, modelB, modelC, meta
+
 
 # ------------------------------------------------------------
 # PAGE CONFIG
@@ -149,5 +193,6 @@ st.caption(
     "KeraRisk-CXL | Research use only — not a diagnostic device. "
     "Model trained and validated as described in the associated manuscript."
 )
+
 
 
