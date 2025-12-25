@@ -1,0 +1,16 @@
+{
+  "created_utc": "2025-12-25T02:55:59.715543+00:00",
+  "inputs": [
+    "age",
+    "kmax0",
+    "pachy0",
+    "bcva0",
+    "cyl0",
+    "group"
+  ],
+  "groups": [
+    "FRAK",
+    "FRAKcross"
+  ],
+  "notes": "Research/educational use only. Not externally validated."
+}

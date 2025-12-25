@@ -1,0 +1,34 @@
+{
+  "timestamp_utc": "2025-12-25T02:49:32.914213+00:00",
+  "app": {
+    "name": "KeraRisk-CXL",
+    "purpose": "Research use only"
+  },
+  "inputs": {
+    "age": 18.0,
+    "kmax0": 54.9,
+    "pachy0": 340.0,
+    "bcva0": 1.0000000000000002,
+    "cyl0": 5.0,
+    "group": "FRAKcross"
+  },
+  "outputs": {
+    "risk_A": 0.7517637804302355,
+    "risk_C": 0.6934015769932768,
+    "slope_B": 7.29880563881674,
+    "tier_C": "High",
+    "tier_thresholds": {
+      "low_lt": 0.15,
+      "intermediate_lt": 0.35,
+      "high_ge": 0.35
+    },
+    "slope_projection": {
+      "1y": 7.29880563881674,
+      "2y": 14.59761127763348,
+      "3y": 21.89641691645022
+    }
+  },
+  "plausibility_flags": [
+    "Very thin cornea (pachymetry < 400 \u00b5m)."
+  ]
+}
