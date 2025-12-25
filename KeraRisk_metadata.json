@@ -1,0 +1,19 @@
+{
+  "created_utc": "2025-12-24T21:55:29.241125Z",
+  "model": "LogisticRegression + preprocessing (scaler + onehot)",
+  "endpoint": "C",
+  "endpoint_definition": "(\u0394Kmax >= 1.5) OR (BCVA drop >= 0.2) OR (Cylinder inc >= 1.0) within 5 years",
+  "inputs": [
+    "age",
+    "kmax0",
+    "pachy0",
+    "bcva0",
+    "cyl0",
+    "group"
+  ],
+  "groups_allowed": [
+    "FRAK",
+    "FRAKcross"
+  ],
+  "notes": "This tool is for research/educational use. Not validated externally."
+}
