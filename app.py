@@ -25,74 +25,96 @@ META_NAME    = "kerarisk_meta.json"
 
 
 # -----------------------------
-# LOAD ASSETS (NO UI INSIDE CACHE)
-# Looks in ROOT first; if not found, tries assets/
+# Helpers
+# -----------------------------
+def resolve_paths(base: Path, filename: str) -> Path:
+    """Look in repo root first; if not found, try assets/."""
+    p1 = base / filename
+    if p1.exists():
+        return p1
+    p2 = base / "assets" / filename
+    if p2.exists():
+        return p2
+    return p1  # return expected path (clean error message)
+
+
+def safe_skops_load(path: Path, extra_trusted=None, debug=False):
+    """
+    Robust skops loader across sklearn versions:
+    1) try strict load with a minimal trusted list
+    2) if it fails with untrusted types, retrieve them and retry
+    """
+    # minimal safe baseline (these are stable)
+    trusted = [
+        "sklearn.pipeline.Pipeline",
+        "sklearn.compose._column_transformer.ColumnTransformer",
+        "sklearn.impute._base.SimpleImputer",
+        "sklearn.preprocessing._encoders.OneHotEncoder",
+        "sklearn.preprocessing._data.StandardScaler",
+        "sklearn.linear_model._logistic.LogisticRegression",
+        "sklearn.linear_model._coordinate_descent.ElasticNet",
+        "numpy.ndarray",
+        "numpy.dtype",
+    ]
+    if extra_trusted:
+        trusted.extend(list(extra_trusted))
+
+    # 1) attempt
+    try:
+        return sio.load(path, trusted=trusted), trusted, []
+    except Exception as e:
+        msg = str(e)
+        if "Untrusted types found in the file" not in msg:
+            raise  # genuine error (file missing/corrupt/etc.)
+
+    # 2) get actual untrusted types
+    untrusted = sio.get_untrusted_types(path)
+    # convert to strings (skops accepts list[str])
+    untrusted_str = [str(t) for t in untrusted]
+
+    # 3) retry trusting exactly what's required
+    trusted2 = sorted(set(trusted + untrusted_str))
+
+    if debug:
+        st.sidebar.write(f"🔐 Auto-trusting {len(untrusted_str)} extra type(s) for {path.name}:")
+        st.sidebar.code("\n".join(untrusted_str))
+
+    obj = sio.load(path, trusted=trusted2)
+    return obj, trusted2, untrusted_str
+
+
+# -----------------------------
+# LOAD ASSETS
 # -----------------------------
 @st.cache_resource
-def load_assets():
+def load_assets(debug_flag=False):
     base = Path(__file__).resolve().parent
 
-    # 1) Prefer ROOT (repo root where app.py lives)
-    root_dir = base
+    modelA_path = resolve_paths(base, MODEL_A_NAME)
+    modelB_path = resolve_paths(base, MODEL_B_NAME)
+    modelC_path = resolve_paths(base, MODEL_C_NAME)
+    meta_path   = resolve_paths(base, META_NAME)
 
-    # 2) Fallback to assets/
-    assets_dir = base / "assets"
-
-    def resolve_file(filename: str) -> Path:
-        p1 = root_dir / filename
-        if p1.exists():
-            return p1
-        p2 = assets_dir / filename
-        if p2.exists():
-            return p2
-        return p1  # expected (for clean error msg)
-
-    modelA_path = resolve_file(MODEL_A_NAME)
-    modelB_path = resolve_file(MODEL_B_NAME)
-    modelC_path = resolve_file(MODEL_C_NAME)
-    meta_path   = resolve_file(META_NAME)
-
-    # hard checks
     missing = [p for p in [modelA_path, modelB_path, modelC_path, meta_path] if not p.exists()]
     if missing:
         raise FileNotFoundError(
             "Missing required file(s):\n"
-            + "\n".join([f"- {p.name} (looked in: {p.parent})" for p in missing])
+            + "\n".join([f"- {p.name} (expected at: {p})" for p in missing])
             + f"\n\nBase directory: {base}"
-            + f"\nAlso checked: {assets_dir}"
+            + f"\nAlso checked: {base/'assets'}"
         )
 
-    # ✅ Trusted types for skops safe loading (FIXES Untrusted types)
-    trusted = [
-        # sklearn core
-        "sklearn.pipeline.Pipeline",
-        "sklearn.compose._column_transformer.ColumnTransformer",
-        "sklearn.compose._column_transformer._RemainderColsList",
-
-        # preprocessing
-        "sklearn.impute._base.SimpleImputer",
-        "sklearn.preprocessing._encoders.OneHotEncoder",
-        "sklearn.preprocessing._data.StandardScaler",
-
-        # models
-        "sklearn.linear_model._logistic.LogisticRegression",
-        "sklearn.linear_model._coordinate_descent.ElasticNet",
-
-        # numpy internals (safe)
-        "numpy.ndarray",
-        "numpy.dtype",
-    ]
-
-    modelA = sio.load(modelA_path, trusted=trusted)
-    modelB = sio.load(modelB_path, trusted=trusted)
-    modelC = sio.load(modelC_path, trusted=trusted)
-
+    # load meta
     meta = json.loads(meta_path.read_text())
+
+    # robust skops loading
+    modelA, trustedA, extraA = safe_skops_load(modelA_path, debug=debug_flag)
+    modelB, trustedB, extraB = safe_skops_load(modelB_path, debug=debug_flag)
+    modelC, trustedC, extraC = safe_skops_load(modelC_path, debug=debug_flag)
 
     # Ensure meta["groups"]
     if "groups" not in meta or not meta["groups"]:
         try:
-            # Infer categories from OneHotEncoder if present
             ohe = (
                 modelC.named_steps["pre"]
                       .named_transformers_["cat"]
@@ -108,19 +130,28 @@ def load_assets():
         "modelC": str(modelC_path),
         "meta": str(meta_path),
         "base": str(base),
-        "assets_dir": str(assets_dir),
+        "assets_dir": str(base / "assets"),
     }
 
-    return modelA, modelB, modelC, meta, used_paths
+    trusted_report = {
+        "modelA_trusted_count": len(trustedA),
+        "modelB_trusted_count": len(trustedB),
+        "modelC_trusted_count": len(trustedC),
+        "modelA_extra_trusted": extraA,
+        "modelB_extra_trusted": extraB,
+        "modelC_extra_trusted": extraC,
+    }
+
+    return modelA, modelB, modelC, meta, used_paths, trusted_report
 
 
 # -----------------------------
-# SAFE LOADING WRAPPER + DEBUG
+# DEBUG UI
 # -----------------------------
-debug = st.sidebar.checkbox("Debug (show file paths)", value=False)
+debug = st.sidebar.checkbox("Debug (show paths & trusted types)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, used_paths = load_assets()
+    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(debug_flag=debug)
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
@@ -129,17 +160,8 @@ except Exception as e:
 if debug:
     st.sidebar.write("Resolved paths:")
     st.sidebar.json(used_paths)
-
-    base = Path(used_paths["base"])
-    st.sidebar.write("Files in base:")
-    st.sidebar.write(sorted([p.name for p in base.iterdir() if p.is_file()]))
-
-    assets_dir = Path(used_paths["assets_dir"])
-    if assets_dir.exists():
-        st.sidebar.write("Files in assets/:")
-        st.sidebar.write(sorted([p.name for p in assets_dir.iterdir() if p.is_file()]))
-    else:
-        st.sidebar.write("assets/ folder does not exist (OK).")
+    st.sidebar.write("Trusted report:")
+    st.sidebar.json(trusted_report)
 
 
 # -----------------------------
@@ -203,8 +225,3 @@ else:
 
 st.markdown("---")
 st.caption("KeraRisk-CXL | Research use only. Validate locally before clinical deployment.")
-
-
-
-
-
