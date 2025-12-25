@@ -1,6 +1,9 @@
-streamlit>=1.36
-pandas>=2.2
-numpy>=2.0
-scikit-learn>=1.4
-skops>=0.10
+streamlit>=1.32,<2.0
 
+pandas>=2.0,<3.0
+numpy>=1.24,<2.0
+
+scikit-learn>=1.4,<1.6
+skops>=0.10,<0.12
+
+typing-extensions>=4.8
