@@ -1,11 +1,11 @@
 # app.py
 # KeraRisk-CXL Calculator (Streamlit)
 # - Robust skops loader (CVE-2024-37065 compatible)
-# - Meta optional (won't crash if missing OR if Streamlit Cloud snapshot is stale)
+# - Meta optional (won't crash if missing / deploy stale)
 # - Safe handling for Model B not fitted (won't crash)
-# - Cache fingerprint to avoid Streamlit Cloud stale artifacts
+# - Cache fingerprint to reduce Streamlit Cloud stale artifacts
 # - Exports JSON + PDF report
-# - Endpoint B projections: Linear OR Damped exponential (non-linear, stabilizing)
+# - Endpoint B projections: Auto(validated) / Linear / Damped exponential + optional uncertainty band (λ CI)
 
 import json
 import re
@@ -211,9 +211,12 @@ def build_pdf_report(bundle: dict) -> bytes:
         line("", dy=0.35 * cm)
         line("Endpoint B — projections", dy=0.65 * cm, font="Helvetica-Bold", size=12)
         line(f"- Method: {sp.get('method','')}")
-        lam = sp.get("lambda", None)
+        lam = sp.get("lambda_central", None)
         if lam is not None:
-            line(f"- Damping rate λ (1/year): {float(lam):.2f}")
+            line(f"- λ central (1/year): {float(lam):.2f}")
+        ci = sp.get("lambda_ci95", None)
+        if isinstance(ci, list) and len(ci) == 2:
+            line(f"- λ 95% CI (1/year): [{float(ci[0]):.2f}, {float(ci[1]):.2f}]")
         line(f"- Max years: {sp.get('max_years','')}")
 
         vals = sp.get("values", [])
@@ -299,6 +302,20 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
             meta["groups"] = [str(x) for x in list(ohe.categories_[0])]
         except Exception:
             meta["groups"] = ["FRAK", "FRAKcross"]
+
+    # Ensure projection meta defaults exist (so app behavior is reproducible)
+    # You can override these in kerarisk_meta.json under "projection".
+    proj = meta.get("projection", {})
+    meta["projection"] = {
+        "default_method": proj.get("default_method", "damped_exponential"),
+        "lambda": float(proj.get("lambda", 0.6)),
+        "lambda_ci95": proj.get("lambda_ci95", [0.4, 0.9]),
+        "validated_horizons_years": proj.get("validated_horizons_years", [1, 2, 3, 5]),
+        "notes": proj.get(
+            "notes",
+            "Damped exponential reduces long-term divergence; validate on your cohort for MAE/RMSE at 2–5y.",
+        ),
+    }
 
     used_paths = {
         "modelA": str(modelA_path),
@@ -443,61 +460,148 @@ else:
 
 
 # -----------------------------
-# Endpoint B: NON-LINEAR projections (Linear OR Damped Exponential)
+# Endpoint B: Projections (Auto/Linear/Damped + uncertainty band)
 # -----------------------------
 st.subheader("📈 Endpoint B: projections (up to 5 years)")
 
-st.sidebar.subheader("⚙️ Projection settings")
-
-PROJ_METHOD = st.sidebar.selectbox(
-    "Projection model",
-    ["Linear (baseline)", "Damped exponential (recommended)"],
-    index=1,
-    help=(
-        "Linear: ΔK(t)=slope·t\n"
-        "Damped exponential: ΔK(t)=(slope/λ)·(1−e^(−λt)), converging to a plateau"
-    ),
-)
-
-MAX_YEARS = 5
-
-LAMBDA = None
-if PROJ_METHOD == "Damped exponential (recommended)":
-    LAMBDA = st.sidebar.number_input(
-        "Damping rate λ (1/year)",
-        min_value=0.1,
-        max_value=2.0,
-        value=0.6,
-        step=0.1,
-        help="Higher λ → faster stabilization after CXL",
-    )
-
 proj = None
+proj_method = None
+lambda_central = None
+lambda_ci95 = None
+show_uncertainty = None
+MAX_YEARS = 5
 
 if slope_B is None:
     st.info("Endpoint B projections are unavailable because Model B is not fitted in the deployed artifact.")
 else:
+    proj_meta = meta.get("projection", {})
+    default_method = proj_meta.get("default_method", "damped_exponential")
+
+    lambda_central = float(proj_meta.get("lambda", 0.6))
+    ci = proj_meta.get("lambda_ci95", [0.4, 0.9])
+    if isinstance(ci, list) and len(ci) == 2:
+        lambda_ci95 = [float(ci[0]), float(ci[1])]
+    else:
+        lambda_ci95 = [0.4, 0.9]
+
+    # For damped exponential: higher λ -> faster stabilization -> smaller ΔK
+    lambda_low = float(min(lambda_ci95))
+    lambda_high = float(max(lambda_ci95))
+
+    # Sidebar controls
+    st.sidebar.subheader("⚙️ Projection settings")
+
+    options = ["Auto (validated)", "Linear (baseline)", "Damped exponential (recommended)"]
+    default_index = 0
+    if default_method == "linear":
+        default_index = 1
+    elif default_method in ("damped_exponential", "damped"):
+        default_index = 2
+
+    proj_method = st.sidebar.selectbox(
+        "Projection model",
+        options,
+        index=default_index if default_index < len(options) else 0,
+        help="Auto uses linear at 1y and damped exponential for ≥2y to reduce long-term divergence.",
+    )
+
+    show_uncertainty = st.sidebar.checkbox(
+        "Show uncertainty band (λ 95% CI)",
+        value=True,
+        help="Uses λ CI from kerarisk_meta.json (or defaults if missing).",
+    )
+
+    # Allow user to override λ if they want
+    with st.sidebar.expander("Advanced: override λ", expanded=False):
+        lambda_central = st.number_input(
+            "λ central (1/year)",
+            min_value=0.1,
+            max_value=2.0,
+            value=float(lambda_central),
+            step=0.05,
+        )
+        l1, l2 = lambda_ci95
+        l1 = st.number_input("λ low (1/year)", min_value=0.05, max_value=2.0, value=float(l1), step=0.05)
+        l2 = st.number_input("λ high (1/year)", min_value=0.05, max_value=2.0, value=float(l2), step=0.05)
+        lambda_ci95 = [float(min(l1, l2)), float(max(l1, l2))]
+        lambda_low, lambda_high = lambda_ci95[0], lambda_ci95[1]
+
+    def damped(delta_slope: float, lam: float, t_years: float) -> float:
+        return (delta_slope / lam) * (1.0 - np.exp(-lam * t_years))
+
     rows = []
     for year in range(1, MAX_YEARS + 1):
-        if PROJ_METHOD == "Linear (baseline)":
-            delta = slope_B * year
+        # method per year if Auto
+        if proj_method == "Auto (validated)":
+            method_used = "Linear (baseline)" if year == 1 else "Damped exponential (recommended)"
         else:
-            delta = (slope_B / float(LAMBDA)) * (1.0 - np.exp(-float(LAMBDA) * year))
-        rows.append({"Year": year, "Projected ΔKmax (D)": delta, "Projection model": PROJ_METHOD})
+            method_used = proj_method
+
+        if method_used == "Linear (baseline)":
+            delta = slope_B * year
+            delta_lo = None
+            delta_hi = None
+        else:
+            delta = damped(slope_B, float(lambda_central), year)
+            if show_uncertainty:
+                # higher λ => smaller ΔK (faster stabilization)
+                delta_lo = damped(slope_B, float(lambda_high), year)
+                delta_hi = damped(slope_B, float(lambda_low), year)
+            else:
+                delta_lo = None
+                delta_hi = None
+
+        rows.append(
+            {
+                "Year": year,
+                "Projected ΔKmax (D)": delta,
+                "Model (used)": method_used,
+                "ΔK low (λ_high)": delta_lo,
+                "ΔK high (λ_low)": delta_hi,
+            }
+        )
 
     proj = pd.DataFrame(rows)
 
-    st.dataframe(
-        proj.style.format({"Projected ΔKmax (D)": "{:+.2f}"}),
-        use_container_width=True,
-        hide_index=True,
-    )
+    if show_uncertainty:
+        st.dataframe(
+            proj.style.format(
+                {
+                    "Projected ΔKmax (D)": "{:+.2f}",
+                    "ΔK low (λ_high)": "{:+.2f}",
+                    "ΔK high (λ_low)": "{:+.2f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Auto (validated) uses linear at 1y and damped exponential for ≥2y. "
+            "Uncertainty band uses λ 95% CI (higher λ → smaller ΔK). "
+            "Interpret as an aid, not a deterministic forecast."
+        )
+    else:
+        proj_view = proj[["Year", "Projected ΔKmax (D)", "Model (used)"]]
+        st.dataframe(
+            proj_view.style.format({"Projected ΔKmax (D)": "{:+.2f}"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Auto (validated) uses linear at 1y and damped exponential for ≥2y to avoid long-term divergence. "
+            "Damped exponential assumes stabilization; interpret as an aid, not a deterministic forecast."
+        )
 
-    st.caption(
-        "Non-linear projection shown when selected. "
-        "The damped exponential model assumes progressive stabilization and "
-        "should not be interpreted as a deterministic forecast."
-    )
+    with st.expander("Why these projection models?"):
+        st.markdown(
+            """
+- **Linear** extrapolates the predicted slope indefinitely: ΔK(t)=slope·t.  
+- **Damped exponential** assumes progressive stabilization: ΔK(t)=(slope/λ)·(1−e^(−λt)).  
+- **Auto (validated)** uses linear at 1 year and damped exponential for ≥2 years to reduce long-term overestimation.
+
+For rigorous selection, calibrate **λ** and compare **MAE/RMSE** at 2–5y using your cohort.
+            """.strip()
+        )
 
 
 # -----------------------------
@@ -524,17 +628,33 @@ bundle = {
         "tier_thresholds": {"low_lt": 0.15, "intermediate_lt": 0.35, "high_ge": 0.35},
     },
     "plausibility_flags": flags,
+    "meta_notes": meta.get("notes", "Research use only — not a diagnostic device."),
 }
 
 if slope_B is not None and proj is not None:
+    values = []
+    for _, r in proj.iterrows():
+        values.append(
+            {
+                "year": int(r["Year"]),
+                "delta_kmax_D": float(r["Projected ΔKmax (D)"]),
+                "model_used": str(r["Model (used)"]),
+                "delta_kmax_low_lambda_high": None
+                if pd.isna(r["ΔK low (λ_high)"])
+                else float(r["ΔK low (λ_high)"]),
+                "delta_kmax_high_lambda_low": None
+                if pd.isna(r["ΔK high (λ_low)"])
+                else float(r["ΔK high (λ_low)"]),
+            }
+        )
+
     bundle["outputs"]["slope_projection"] = {
-        "method": PROJ_METHOD,
-        "lambda": float(LAMBDA) if LAMBDA is not None else None,
+        "method": proj_method,
+        "lambda_central": float(lambda_central) if lambda_central is not None else None,
+        "lambda_ci95": [float(lambda_ci95[0]), float(lambda_ci95[1])] if lambda_ci95 is not None else None,
+        "show_uncertainty_band": bool(show_uncertainty) if show_uncertainty is not None else None,
         "max_years": int(MAX_YEARS),
-        "values": [
-            {"year": int(r["Year"]), "delta_kmax_D": float(r["Projected ΔKmax (D)"])}
-            for _, r in proj.iterrows()
-        ],
+        "values": values,
     }
 
 st.download_button(
