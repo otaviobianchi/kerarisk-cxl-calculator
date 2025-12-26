@@ -6,6 +6,7 @@
 # - Cache fingerprint to reduce Streamlit Cloud stale artifacts
 # - Exports JSON + PDF report
 # - Endpoint B projections: Auto(validated) / Linear / Damped exponential + optional uncertainty band (λ CI)
+# - Adds continuous Auto(validated) curve (0–5y) with optional uncertainty band + export to JSON
 
 import json
 import re
@@ -229,6 +230,17 @@ def build_pdf_report(bundle: dict) -> bytes:
                 except Exception:
                     continue
 
+    # Auto curve summary (optional)
+    ac = out.get("auto_validated_curve", None)
+    if isinstance(ac, dict) and ac.get("years_grid"):
+        line("", dy=0.35 * cm)
+        line("Auto (validated) curve", dy=0.65 * cm, font="Helvetica-Bold", size=12)
+        line("Definition: linear 0–1y; then ΔK(t)=ΔK(1)+(slope/λ)(1-exp(-λ(t-1))) for t>1", dy=0.55 * cm, size=10)
+        line(f"λ central: {ac.get('lambda_central')}", dy=0.55 * cm, size=10)
+        ci = ac.get("lambda_ci95", None)
+        if isinstance(ci, list) and len(ci) == 2:
+            line(f"λ 95% CI: [{ci[0]}, {ci[1]}]", dy=0.55 * cm, size=10)
+
     flags = bundle.get("plausibility_flags", [])
     line("", dy=0.35 * cm)
     line("Plausibility flags", dy=0.65 * cm, font="Helvetica-Bold", size=12)
@@ -304,7 +316,6 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
             meta["groups"] = ["FRAK", "FRAKcross"]
 
     # Ensure projection meta defaults exist (so app behavior is reproducible)
-    # You can override these in kerarisk_meta.json under "projection".
     proj = meta.get("projection", {})
     meta["projection"] = {
         "default_method": proj.get("default_method", "damped_exponential"),
@@ -344,7 +355,9 @@ def load_assets(debug_flag=False, fingerprint: str = ""):
 debug = st.sidebar.checkbox("Debug (paths & trusted types)", value=False)
 
 try:
-    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(debug_flag=debug, fingerprint=fingerprint)
+    modelA, modelB, modelC, meta, used_paths, trusted_report = load_assets(
+        debug_flag=debug, fingerprint=fingerprint
+    )
 except Exception as e:
     st.error("❌ Failed to load models/assets.")
     st.code(str(e))
@@ -387,14 +400,18 @@ cyl0 = st.sidebar.number_input("Cylinder (D)", min_value=0.0, max_value=20.0, va
 
 group = st.sidebar.selectbox("Treatment group", meta.get("groups", ["FRAK", "FRAKcross"]))
 
-X = pd.DataFrame([{
-    "age": float(age),
-    "kmax0": float(kmax0),
-    "pachy0": float(pachy0),
-    "bcva0": float(bcva0),
-    "cyl0": float(cyl0),
-    "group": str(group),
-}])
+X = pd.DataFrame(
+    [
+        {
+            "age": float(age),
+            "kmax0": float(kmax0),
+            "pachy0": float(pachy0),
+            "bcva0": float(bcva0),
+            "cyl0": float(cyl0),
+            "group": str(group),
+        }
+    ]
+)
 
 
 # -----------------------------
@@ -470,6 +487,14 @@ lambda_central = None
 lambda_ci95 = None
 show_uncertainty = None
 MAX_YEARS = 5
+
+# For exporting Auto curve
+t_grid = None
+y_c = None
+y_low = None
+y_high = None
+auto_curve_df = None
+auto_curve_available = False
 
 if slope_B is None:
     st.info("Endpoint B projections are unavailable because Model B is not fitted in the deployed artifact.")
@@ -597,11 +622,62 @@ else:
             """
 - **Linear** extrapolates the predicted slope indefinitely: ΔK(t)=slope·t.  
 - **Damped exponential** assumes progressive stabilization: ΔK(t)=(slope/λ)·(1−e^(−λt)).  
-- **Auto (validated)** uses linear at 1 year and damped exponential for ≥2 years to reduce long-term overestimation.
+- **Auto (validated)** uses linear at 1 year and damped exponential for t>1 year, enforcing continuity at 1y to reduce long-term overestimation.
 
 For rigorous selection, calibrate **λ** and compare **MAE/RMSE** at 2–5y using your cohort.
             """.strip()
         )
+
+    # -----------------------------
+    # Curve for Auto (validated): continuous ΔK(t) from 0..5y
+    # Linear 0..1y, then damped-exponential for t>1 with continuity at t=1
+    # -----------------------------
+    st.subheader("📉 Auto (validated) curve (continuous, 0–5 years)")
+
+    slope = float(slope_B)
+    lam_c = float(lambda_central)
+    lam_lo = float(lambda_low)
+    lam_hi = float(lambda_high)
+
+    t_grid = np.linspace(0.0, float(MAX_YEARS), 251)
+
+    def auto_curve(t, lam):
+        t = float(t)
+        if t <= 1.0:
+            return slope * t
+        # ΔK(1)=slope*1, then damped for the remaining time (t-1)
+        return slope * 1.0 + damped(slope, lam, (t - 1.0))
+
+    y_c = np.array([auto_curve(ti, lam_c) for ti in t_grid])
+
+    auto_curve_df = pd.DataFrame(
+        {
+            "Years": t_grid,
+            "ΔKmax (Auto, central)": y_c,
+        }
+    )
+
+    if show_uncertainty:
+        # higher λ => faster stabilization => smaller ΔK
+        y_low = np.array([auto_curve(ti, lam_hi) for ti in t_grid])   # conservative low ΔK
+        y_high = np.array([auto_curve(ti, lam_lo) for ti in t_grid])  # higher ΔK
+        auto_curve_df["ΔKmax (Auto, low band)"] = y_low
+        auto_curve_df["ΔKmax (Auto, high band)"] = y_high
+        st.caption(
+            "Auto curve = linear (0–1y) + damped exponential (>1y) with continuity at 1y. "
+            "Band uses λ 95% CI (higher λ → smaller ΔK)."
+        )
+    else:
+        st.caption(
+            "Auto curve = linear (0–1y) + damped exponential (>1y) with continuity at 1y."
+        )
+
+    st.line_chart(auto_curve_df.set_index("Years"), use_container_width=True)
+
+    with st.expander("Show curve data (Auto validated)"):
+        st.dataframe(auto_curve_df, use_container_width=True, hide_index=True)
+
+    auto_curve_available = True
 
 
 # -----------------------------
@@ -656,6 +732,19 @@ if slope_B is not None and proj is not None:
         "max_years": int(MAX_YEARS),
         "values": values,
     }
+
+# Export Auto curve data (if available)
+if auto_curve_available and t_grid is not None and y_c is not None:
+    bundle["outputs"]["auto_validated_curve"] = {
+        "years_grid": [float(x) for x in t_grid],
+        "delta_kmax_central": [float(x) for x in y_c],
+        "lambda_central": float(lambda_central) if lambda_central is not None else None,
+        "lambda_ci95": [float(lambda_ci95[0]), float(lambda_ci95[1])] if lambda_ci95 is not None else None,
+        "definition": "linear 0–1y; then ΔK(t)=ΔK(1)+ (slope/λ)(1-exp(-λ(t-1))) for t>1",
+    }
+    if show_uncertainty and y_low is not None and y_high is not None:
+        bundle["outputs"]["auto_validated_curve"]["delta_kmax_low_band"] = [float(x) for x in y_low]
+        bundle["outputs"]["auto_validated_curve"]["delta_kmax_high_band"] = [float(x) for x in y_high]
 
 st.download_button(
     label="Download JSON report",
