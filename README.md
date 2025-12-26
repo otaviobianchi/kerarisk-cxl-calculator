@@ -1,210 +1,237 @@
-🩺 KeraRisk-CXL
+# 🩺 KeraRisk-CXL (Academic Research Tool)
 
-Clinical risk stratification and progression modeling in keratoconus
+**KeraRisk-CXL** is an **academic, data-driven research tool** for **risk stratification and progression modeling in keratoconus**, based on baseline tomographic and functional parameters.
 
-📌 Overview
+> ⚠️ **Research / educational use only.**  
+> This project is **not** a medical device, **not** a diagnostic system, and **must not** be used as a standalone basis for clinical decisions.  
+> The objective is **scientific reproducibility, methodology transparency, and academic validation**.
 
-KeraRisk-CXL is a data-driven clinical decision-support tool designed to estimate the risk of keratoconus progression using baseline tomographic and functional parameters.
+---
 
-The platform integrates three complementary predictive endpoints, derived from longitudinal clinical data and validated using out-of-fold cross-validation:
+## 📌 Overview
 
-Endpoint A — Structural progression (ΔKmax)
+KeraRisk-CXL estimates keratoconus progression using **three complementary endpoints** derived from longitudinal clinical data and evaluated with **out-of-fold cross-validation**:
 
-Endpoint B — Annual Kmax slope (D/year)
+- **Endpoint A — Structural progression (ΔKmax)** *(classification)*
+- **Endpoint B — Annual Kmax slope (D/year)** *(regression)*
+- **Endpoint C — Composite clinical progression (structural + functional)** *(classification)*
 
-Endpoint C — Composite clinical progression (structural + functional)
+The repository provides an **online-style calculator** (Streamlit) that enables **reproducible inference** from trained models and generates **exportable reports (JSON + PDF)** for academic auditing and documentation.
 
-The tool is implemented as an online calculator for ophthalmologists and researchers, ensuring interpretability, reproducibility, and clinical relevance.
+---
 
-⚠️ Research use only. This tool is not intended as a standalone diagnostic device.
+## 🧠 Scientific Rationale
 
-🧠 Scientific Rationale
+Keratoconus progression is heterogeneous and multifactorial. Single-threshold criteria (e.g., ΔKmax ≥ 1.0 D) may fail to capture:
 
-Keratoconus progression is heterogeneous and multifactorial. Traditional single-threshold definitions (e.g., ΔKmax ≥ 1.0 D) may fail to capture:
+- measurement noise and variable follow-up schedules  
+- functional deterioration without major tomographic change  
+- heterogeneous rates of progression (fast vs. slow progressors)
 
-Noisy longitudinal measurements
+To address these limitations, KeraRisk-CXL adopts a **multi-endpoint strategy**:
 
-Functional deterioration without marked tomographic change
+- **Endpoint A** captures **peak structural worsening**
+- **Endpoint B** captures **velocity of progression**
+- **Endpoint C** captures **clinically meaningful deterioration** even when structural change alone is equivocal
 
-Variable progression rates over time
+This design is intended to support **academic studies on progression definitions**, model comparison, calibration, and external validation workflows.
 
-To address these limitations, KeraRisk-CXL models progression using:
+---
 
-Binary structural change (Endpoint A)
+## 📊 Endpoints Definition
 
-Continuous progression velocity (Endpoint B)
+### 🔹 Endpoint A — Structural Progression (ΔKmax)
+- **Type:** Binary classification  
+- **Definition:**  
+  \[
+  \max(Kmax \le 5\ \text{years}) - Kmax_{baseline} \ge 1.5\ D
+  \]
+- Captures peak structural worsening  
+- More robust to visit timing variation and noise  
+- Aligned with common tomographic criteria used in the literature
 
-Composite clinically meaningful deterioration (Endpoint C)
+---
 
-This multi-endpoint strategy reflects real-world clinical decision-making, particularly in the context of CXL indication and follow-up planning.
+### 🔹 Endpoint B — Annual Kmax Slope
+- **Type:** Regression (D/year)  
+- Estimated using robust longitudinal fitting (e.g., **Theil–Sen regression**) on Kmax time series  
+- Quantifies progression rate (velocity), useful for academic analyses of individualized follow-up strategies  
+- Less sensitive to outliers than simple least-squares slope
 
-📊 Endpoints Definition
-🔹 Endpoint A — Structural Progression
+---
 
-Binary classification
+### 🔹 Endpoint C — Composite Clinical Progression
+- **Type:** Binary classification  
+- **Definition:** progression is flagged if **any** occur within 5 years:
+  - ΔKmax ≥ 1.5 D  
+  - BCVA decrease ≥ 0.2 (decimal)  
+  - Cylinder increase ≥ 1.0 D  
+- Captures clinically meaningful deterioration beyond tomographic changes alone  
+- Designed for academically exploring “actionable deterioration” definitions
 
-Progression defined as:
-max(Kmax ≤ 5 years) − Kmax_baseline ≥ 1.5 D
+---
 
-Captures peak structural worsening
+## 🧮 Model Architecture
 
-Robust to visit timing and noise
+### Inputs (baseline)
+- Age (years)  
+- Kmax (D)  
+- Minimum pachymetry (µm)  
+- BCVA (decimal)  
+- Cylinder (D)  
+- Treatment group (categorical)
 
-Aligned with common tomographic criteria in literature
+### Preprocessing (shared)
+- Median imputation (numeric)  
+- Standard scaling  
+- One-hot encoding (group)
 
-🔹 Endpoint B — Annual Kmax Slope
+### Models
+- Endpoint A: Logistic Regression (class-weighted)  
+- Endpoint B: ElasticNet regression  
+- Endpoint C: Logistic Regression (class-weighted)
 
-Regression (D/year)
+Models are trained under cross-validation, and **OOF predictions** are used for reported metrics, calibration analyses, and figures.
 
-Estimated using robust Theil–Sen regression on longitudinal Kmax
+---
 
-Quantifies rate of progression
+## 📈 Performance (Out-of-Fold) *(example summary)*
+> Replace with your final manuscript numbers if updated.
 
-Less sensitive to outliers
+| Endpoint | Task | Metric (OOF) |
+|---|---|---|
+| A | ΔKmax progression | AUC ≈ 0.71 |
+| B | Kmax slope | MAE ≈ 2.3 D/year |
+| C | Composite endpoint | AUC ≈ 0.70 |
 
-Clinically useful for individualized follow-up intervals
+Calibration curves, ROC curves, and observed-vs-predicted analyses are produced by the training/validation pipeline.
 
-🔹 Endpoint C — Composite Clinical Endpoint
+---
 
-Binary classification
+## 🌐 Online Calculator (Streamlit)
 
-Progression defined as any of the following within 5 years:
+The app allows you to:
+- input baseline patient variables  
+- compute Endpoint A/C probabilities and Endpoint B slope  
+- export **JSON + PDF** reports for academic documentation
 
-ΔKmax ≥ 1.5 D
+### Risk tiers (Endpoint C)
+- **Low:** < 15%  
+- **Intermediate:** 15–35%  
+- **High:** ≥ 35%
 
-BCVA decrease ≥ 0.2 (decimal)
+> Note: Tier thresholds are an **interpretability layer** and must be validated for any new cohort.
 
-Cylinder increase ≥ 1.0 D
+---
 
-This endpoint reflects clinically actionable deterioration, even when tomographic progression alone is equivocal.
+## 📈 Endpoint B Projections (Academic Aid)
 
-🧮 Model Architecture
+The app can show projections up to **5 years** using:
 
-All models share a unified preprocessing pipeline:
+### 1) Linear (baseline)
+\[
+\Delta K(t)=\text{slope}\cdot t
+\]
 
-Inputs (baseline):
+### 2) Damped exponential (recommended for long horizons)
+\[
+\Delta K(t)=\frac{\text{slope}}{\lambda}\left(1-e^{-\lambda t}\right)
+\]
 
-Age (years)
+### 3) Auto (validated): piecewise + continuous
+Auto uses:
+- **Linear** for 0–1 year  
+- **Damped exponential** for >1 year **with continuity at t=1**:
 
-Kmax (D)
+\[
+\Delta K(t)=
+\begin{cases}
+\text{slope}\cdot t, & 0 \le t \le 1 \\
+\Delta K(1) + \frac{\text{slope}}{\lambda}\left(1-e^{-\lambda (t-1)}\right), & t>1
+\end{cases}
+\]
 
-Minimum pachymetry (µm)
+The app also plots a **continuous Auto curve (0–5y)** and can display an uncertainty band using a **λ 95% CI** (higher λ → smaller long-term ΔK).
 
-BCVA (decimal)
+> ⚠️ These projections are intended for **academic interpretability and hypothesis generation**, not for clinical forecasting.
 
-Cylinder (D)
+---
 
-Treatment group (categorical)
+## ✅ How to Validate that a Non-Linear Projection is “Best” (Recommended Academic Workflow)
 
-Preprocessing:
+A non-linear projection is only “better” if it improves **out-of-sample** accuracy on your cohort.
 
-Median imputation (numeric)
+Recommended approach (offline):
+1. Use K-fold CV on your cohort  
+2. Predict slopes on validation folds  
+3. For candidate λ values (grid search), compute ΔK at 2–5 years  
+4. Compare **MAE/RMSE** at each horizon  
+5. Select λ minimizing error and quantify uncertainty (bootstrap / CV distribution)
 
-Standard scaling
+---
 
-One-hot encoding (group)
+## 📁 Repository Structure
 
-Models:
-
-Endpoint A: Logistic Regression (class-weighted)
-
-Endpoint B: ElasticNet regression
-
-Endpoint C: Logistic Regression (class-weighted)
-
-Models are trained using cross-validation, and OOF predictions are used for all reported metrics and figures.
-
-📈 Model Performance (Out-of-Fold)
-Model	Endpoint	Metric
-A	ΔKmax progression	AUC ≈ 0.71
-B	Kmax slope	MAE ≈ 2.3 D/year
-C	Composite endpoint	AUC ≈ 0.70
-
-Calibration, ROC curves, and observed vs. predicted analyses are included in the manuscript and generated automatically by the pipeline.
-
-🌐 Online Calculator (Streamlit)
-
-The calculator allows clinicians to:
-
-Enter baseline patient data
-
-Instantly obtain:
-
-Probability of structural progression
-
-Predicted Kmax slope
-
-Composite clinical risk
-
-Receive risk stratification:
-
-Low (<15%)
-
-Intermediate (15–35%)
-
-High (>35%)
-
-The app is implemented using Streamlit and loads models stored safely as .skops files.
-
-📁 Repository Structure
 kerarisk-cxl-calculator/
-│
-├── app.py                     # Streamlit application
-├── README.md                  # This file
-├── requirements.txt           # Dependencies
-│
-├── assets/
-│   ├── KeraRisk_modelA.skops  # Endpoint A model
-│   ├── KeraRisk_modelB.skops  # Endpoint B model
-│   ├── KeraRisk_modelC.skops  # Endpoint C model
-│   └── kerarisk_meta.json     # Metadata (groups, thresholds)
-│
-├── figures/                   # Figures for manuscript
-├── tables/                    # Tables for manuscript
-└── notebooks/                 # Model training & validation
+├── app.py
+├── README.md
+├── requirements.txt
+├── KeraRisk_modelA.skops
+├── KeraRisk_modelB.skops
+├── KeraRisk_modelC.skops
+├── kerarisk_meta.json # optional (groups, projection defaults, notes)
+├── assets/ # optional alternative location
+├── figures/ # manuscript figures
+├── tables/ # manuscript tables
+└── notebooks/ # training/validation notebooks
 
-🚀 How to Run Locally
+yaml
+Copiar código
+
+> The app searches models/metadata in the repo root first, and then in `assets/`.
+
+---
+
+## 🚀 How to Run Locally (Free)
+
+### 1) Create a virtual environment (recommended)
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+2) Install dependencies
+bash
+Copiar código
 pip install -r requirements.txt
+3) Run the app
+bash
+Copiar código
 streamlit run app.py
-
 🔐 Model Security & Reproducibility
+Models are stored as .skops (not pickle/joblib)
 
-Models are stored as .skops, not pickle/joblib
+Safe loading with explicit trusted classes (CVE-aware)
 
-Safe loading with explicit trusted classes
+Reproducible preprocessing + inference pipeline
 
-Fully reproducible preprocessing and inference
-
-🩺 Clinical Use — Practical Guidance
-
-High composite risk: consider closer monitoring or early intervention
-
-High slope but low ΔKmax: progression may be imminent
-
-Functional deterioration alone: still flagged by Endpoint C
-
-The tool is designed to support, not replace, clinical judgment.
-
-⚠️ Limitations
-
+⚠️ Limitations (Academic Transparency)
 Single-center dataset
 
 Modest sample size
 
 External validation pending
 
-Does not replace biomechanical or epithelial mapping
+Does not include biomechanical or epithelial mapping variables by default
 
-These aspects are discussed in detail in the manuscript.
+All limitations should be discussed in the manuscript and considered when interpreting results.
 
 📚 Citation (suggested)
-
-
-KeraRisk-CXL: A multi-endpoint machine learning framework for predicting keratoconus progression
-Journal under review
+KeraRisk-CXL: A multi-endpoint machine learning framework for predicting keratoconus progression. Journal under review.
 
 📬 Contact
+For questions, collaboration, academic validation studies, or method discussions:
 
-For questions, collaboration, or validation studies:
-
-Oss
+Halina Sitnik
+Email: (add institutional email here)
